@@ -53,6 +53,7 @@ public final class Engine {
         ok += hookVisibility(m);
         // 颜色交给系统（见 VStack 注释），这里不再干预
         ok += hookNetSpeedInterval(m);
+        ok += hookSpeedAlign(m, cl);
         return ok;
     }
 
@@ -113,6 +114,71 @@ public final class Engine {
      */
         /** 系统给了明确颜色：直接用它，并等下一帧再重绘（读时钟色更准） */
             /** 时钟文字色一变（状态栏图标换色），立刻重算我们的图标 */
+    /**
+     * 网速数字变宽时整块往左推、右边界不动，这样位数变化不会左右蹦。
+     * 容器宽度改 wrap_content 并靠右沉底；两个 TextView 都靠右，
+     * 单位文字固定不变，所以看上去只有上面那行在往左长。
+     */
+    private static int hookSpeedAlign(XposedModule m, ClassLoader cl) {
+        try {
+            Class<?> c = Class.forName(
+                    "com.oplus.systemui.statusbar.phone.netspeed.widget.NetworkSpeedView",
+                    false, cl != null ? cl : Engine.class.getClassLoader());
+            Method target = null;
+            for (Method x : c.getDeclaredMethods()) {
+                if (x.getName().equals("applyNetworkState")) { target = x; break; }
+            }
+            if (target == null) return 0;
+            m.hook(target).intercept(new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
+                    Object r = ch.proceed();
+                    try { alignSpeedRight((View) ch.getThisObject()); } catch (Throwable ignore) {}
+                    return r;
+                }
+            });
+            return 1;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    private static void alignSpeedRight(View box) {
+        try {
+            final int g = android.view.Gravity.END | android.view.Gravity.CENTER_VERTICAL;
+            ViewGroup.LayoutParams lp = box.getLayoutParams();
+            if (lp != null) {
+                boolean dirty = false;
+                if (lp.width != ViewGroup.LayoutParams.WRAP_CONTENT) {
+                    lp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+                    dirty = true;
+                }
+                if (lp instanceof android.widget.LinearLayout.LayoutParams) {
+                    android.widget.LinearLayout.LayoutParams llp = (android.widget.LinearLayout.LayoutParams) lp;
+                    if (llp.gravity != g) { llp.gravity = g; dirty = true; }
+                } else if (lp instanceof android.widget.FrameLayout.LayoutParams) {
+                    android.widget.FrameLayout.LayoutParams flp = (android.widget.FrameLayout.LayoutParams) lp;
+                    if (flp.gravity != g) { flp.gravity = g; dirty = true; }
+                }
+                if (dirty) box.setLayoutParams(lp);
+            }
+            // 右侧留出与其它图标相同的间距；垂直用居中，两行文字才不会被顶出容器
+            int padR = Math.round(2 * box.getResources().getDisplayMetrics().density);
+            if (box.getPaddingRight() != padR) {
+                box.setPadding(box.getPaddingLeft(), box.getPaddingTop(), padR, box.getPaddingBottom());
+            }
+            if (box instanceof ViewGroup) {
+                ViewGroup vg = (ViewGroup) box;
+                for (int i = 0; i < vg.getChildCount(); i++) {
+                    View c = vg.getChildAt(i);
+                    if (c instanceof android.widget.TextView) {
+                        android.widget.TextView tv = (android.widget.TextView) c;
+                        if (tv.getGravity() != g) tv.setGravity(g);
+                    }
+                }
+            }
+        } catch (Throwable ignore) {}
+    }
+
     private static int hookClockColor(XposedModule m) {
         try {
             Method md = android.widget.TextView.class.getDeclaredMethod("setTextColor", int.class);

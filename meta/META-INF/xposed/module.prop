@@ -2,5 +2,5 @@ minApiVersion=102
 targetApiVersion=102
 staticScope=false
 name=ColorOS 堆叠信号
-version=v1.2
-versionCode=36
+version=v1.3
+versionCode=37

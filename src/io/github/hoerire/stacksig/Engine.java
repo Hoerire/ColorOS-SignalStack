@@ -334,16 +334,7 @@ public final class Engine {
         }
     }
 
-        private static String callerHint() {
-        try {
-            StackTraceElement[] st = new Throwable().getStackTrace();
-            for (int i = 2; i < st.length && i < 8; i++) {
-                if (st[i].getClassName().contains("netspeed")) return st[i].getClassName() + "." + st[i].getMethodName();
-            }
-        } catch (Throwable ignore) {}
-        return "?";
-    }
-
+        
     /** 主入口：找容器 → 取主/副卡 → 合成 */
     private static void stack(ImageView iv) {
         ViewGroup container = null;
@@ -484,7 +475,6 @@ public final class Engine {
         Drawable badge = badgeName == null ? null : Res17.get(badgeName);
 
         VStack v = new VStack(pa, pb, main.getImageTintList(), badge);
-        CUR_VS = new java.lang.ref.WeakReference<>(v);
         v.setHost(main);
         if (FALLBACK_DARK >= 0f) v.setFallbackDark(FALLBACK_DARK);
         try {
@@ -589,8 +579,6 @@ public final class Engine {
             }
         }, 1500);
     }   // 强引用，抓到就记住
-    private static java.lang.ref.WeakReference<VStack> CUR_VS;
-    static final float BADGE_X_FRAC = 0.105f;      // 5G 左边界（与 VStack 默认一致）
     private static java.lang.ref.WeakReference<ImageView> MAIN;
 
     // ---------- 视图工具 ----------

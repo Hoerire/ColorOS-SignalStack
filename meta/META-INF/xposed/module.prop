@@ -1,6 +1,7 @@
 minApiVersion=102
 targetApiVersion=102
-staticScope=false
+staticScope=true
+exceptionMode=protective
 name=ColorOS 堆叠信号
 version=v1.5
 versionCode=39

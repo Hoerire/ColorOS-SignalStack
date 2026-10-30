@@ -585,10 +585,6 @@ public final class Engine {
                         if (d != null) d.invalidateSelf();
                     }
                 } catch (Throwable ignore) {}
-                try {
-                    ImageView m = MAIN == null ? null : MAIN.get();
-                    if (m != null) skinWifi(m);
-                } catch (Throwable ignore) {}
                 h.postDelayed(this, 1000);
             }
         }, 1500);
@@ -743,13 +739,15 @@ public final class Engine {
                             long now = android.os.SystemClock.uptimeMillis();
                             if (now - lastLayoutPass < 90) return;
                             lastLayoutPass = now;
-                            // 每步独立 try：前一步抛异常不能把后面的全都拦住
-                            try { applyWifiRule((ImageView) main); } catch (Throwable ignore) {}
-                            try { stack((ImageView) main); } catch (Throwable ignore) {}
-                            try { lockSpeedWidth(main); } catch (Throwable ignore) {}
-                            try { skinWifi(main); } catch (Throwable ignore) {}
-                            try { tightenRightPadding(main); } catch (Throwable ignore) {}
-                            try { alignEdges(main); } catch (Throwable ignore) {}
+                            try {
+                                applyWifiRule((ImageView) main);
+                                // 布局完成后重跑一次合成（下拉栏那份实例首帧可能是 0 宽，
+                                // 首帧失败后就再没人调用了，这里兜住）
+                                if (main instanceof ImageView) stack((ImageView) main);
+                                lockSpeedWidth(main);
+                                tightenRightPadding(main);
+                                alignEdges(main);
+                            } catch (Throwable ignore) {}
                         }
                     });
         } catch (Throwable ignore) {}
@@ -916,128 +914,6 @@ public final class Engine {
                 SPEED_MAX_W.put(tv, mx);
             }
             if (tv.getMinWidth() != mx) tv.setMinimumWidth(mx);
-        } catch (Throwable ignore) {}
-    }
-
-    /** WiFi 等级 0..3（C17 素材只有四级），未连接返回 3 兜底 */
-    private static int wifiLevel(android.content.Context ctx) {
-        try {
-            android.net.wifi.WifiManager wm = (android.net.wifi.WifiManager)
-                    ctx.getApplicationContext().getSystemService(android.content.Context.WIFI_SERVICE);
-            if (wm == null) return -1;
-            if (!wm.isWifiEnabled()) return -1;
-            android.net.wifi.WifiInfo info = wm.getConnectionInfo();
-            if (info == null || info.getNetworkId() == -1) return -1;
-            int rssi = info.getRssi();
-            if (rssi > 0 || rssi < -127) return -1;
-            return Math.max(0, Math.min(3, android.net.wifi.WifiManager.calculateSignalLevel(rssi, 4)));
-        } catch (Throwable t) {
-            return 3;
-        }
-    }
-
-
-
-        
-    
-    private static ViewGroup statusIconContainer(View main) {
-        View cur = main;
-        for (int i = 0; i < 8; i++) {
-            ViewParent p = cur.getParent();
-            if (!(p instanceof View)) return null;
-            View up = (View) p;
-            if (up.getClass().getSimpleName().contains("StatusIconContainer")) return (ViewGroup) up;
-            cur = up;
-        }
-        return null;
-    }
-
-    private static ImageView firstImage(View v, int depth) {
-        if (v == null || depth > 8) return null;
-        if (v instanceof ImageView && v.getWidth() > 0 && v.getVisibility() == View.VISIBLE) {
-            return (ImageView) v;
-        }
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                ImageView r = firstImage(g.getChildAt(i), depth + 1);
-                if (r != null) return r;
-            }
-        }
-        return null;
-    }
-
-    /** 信号左边最近的那个图标就是 WiFi（顺序是 网速 / WiFi / 信号） */
-    private static ImageView wifiNear(View main) {
-        try {
-            View cur = main;
-            for (int depth = 0; depth < 4; depth++) {
-                ViewParent p = cur.getParent();
-                if (!(p instanceof ViewGroup)) return null;
-                ViewGroup g = (ViewGroup) p;
-                int idx = g.indexOfChild(cur);
-                for (int i = idx - 1; i >= 0; i--) {
-                    View c = g.getChildAt(i);
-                    if (c.getWidth() <= 0 || c.getVisibility() != View.VISIBLE) continue;
-                    ImageView iv = firstImage(c, 0);
-                    if (iv != null && iv.getDrawable() != null) return iv;
-                }
-                cur = g;
-            }
-        } catch (Throwable ignore) {}
-        return null;
-    }
-
-    private static ImageView findWifi(View v, int depth) {
-        if (v == null || depth > 14) return null;
-        if (v instanceof ImageView && v.getWidth() > 0 && v.getHeight() > 0) {
-            String n = entryName(v);
-            if (n != null && n.contains("wifi")
-                    && !n.contains("inout") && !n.contains("_in") && !n.contains("_out")
-                    && !n.contains("activity") && !n.contains("type")) {
-                return (ImageView) v;
-            }
-        }
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                ImageView r = findWifi(g.getChildAt(i), depth + 1);
-                if (r != null) return r;
-            }
-        }
-        return null;
-    }
-
-    /** 把状态栏的 WiFi 图标换成 C17 的样式（系统性换色时照旧转发 tint） */
-    private static void skinWifi(View main) {
-        try {
-            int sw = main.getResources().getDisplayMetrics().widthPixels;
-            View root = main;
-            for (int i = 0; i < 12; i++) {
-                ViewParent p = root.getParent();
-                if (!(p instanceof View)) break;
-                View up = (View) p;
-                root = up;
-                if (up.getWidth() >= sw * 0.9) break;
-            }
-            // 优先在信号所在的 StatusIconContainer 里找，那个容器才是图标真正呆的地方
-            ViewGroup iconBox = statusIconContainer(main);
-            ImageView wifi = findWifi(iconBox != null ? iconBox : root, 0);
-            if (wifi == null) wifi = wifiNear(main);
-            if (wifi == null) return;
-            Drawable d = wifi.getDrawable();
-            if (d == null) return;
-            if (wifi.getWidth() <= 0) return;
-            int lvl = wifiLevel(main.getContext());
-            if (d instanceof Wifi17) {
-                ((Wifi17) d).setIndex(lvl);
-                return;
-            }
-            Wifi17 w = new Wifi17(d);
-            w.setIndex(lvl);
-            android.content.res.ColorStateList tint = wifi.getImageTintList();
-            if (tint != null) w.setTintList(tint);
-            wifi.setImageDrawable(w);
         } catch (Throwable ignore) {}
     }
 

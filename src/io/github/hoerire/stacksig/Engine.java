@@ -864,7 +864,8 @@ public final class Engine {
                 diff = lg - rg;
                 EDGE_DIFF.put(clock, diff);
             }
-            int want = base - diff;
+            // 只补一半：整排往两侧扩得太多，时钟会被挤掉，这里往回收一档
+            int want = base - Math.round(diff * EDGE_FILL);
             if (m.getMarginStart() == want) return;
             m.setMarginStart(want);
             clock.setLayoutParams(m);
@@ -873,6 +874,11 @@ public final class Engine {
 
 
 
+
+    /** 右侧容器内边距收回量（dp）。原为 8，整排外扩过头，时钟被挤掉，收到 4 */
+    private static final float EXTEND_DP = 4f;
+    /** 两端差值补齐比例。原为 1.0（完全拉平），太靠边，收到 0.5 */
+    private static final float EDGE_FILL = 0.5f;
 
     private static final java.util.WeakHashMap<View, Integer> SPEED_MAX_W = new java.util.WeakHashMap<>();
     private static final java.util.WeakHashMap<ViewGroup, Integer> PAD_BASE = new java.util.WeakHashMap<>();
@@ -896,7 +902,7 @@ public final class Engine {
             View bat = findByClass(root, "Battery");
             if (bat == null) return;
             View cur = bat;
-            int cut = Math.round(8 * main.getResources().getDisplayMetrics().density);
+            int cut = Math.round(EXTEND_DP * main.getResources().getDisplayMetrics().density);
             for (int i = 0; i < 6; i++) {
                 ViewParent p = cur.getParent();
                 if (!(p instanceof ViewGroup)) return;

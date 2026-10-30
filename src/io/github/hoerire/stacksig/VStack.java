@@ -23,7 +23,7 @@ public final class VStack extends Drawable {
     private static final float BADGE_H = 0.25f;     // 制式标高度占图标高度
     private static final float BADGE_RATIO = 1.38f; // 14.42 / 10.42
     private static final float BADGE_Y = 0.08f;
-    private static final float BADGE_X = -0.01f;
+    private static final float BADGE_X = 0.02f;
 
     private final Drawable primary;
     private final Drawable secondary;
@@ -92,16 +92,13 @@ public final class VStack extends Drawable {
             Rect b = getBounds();
             if (b.width() <= 0 || b.height() <= 0) return;
 
-            // 素材画布 19 宽，墨迹只占 x=2.0~16.44；按"墨迹"铺满 bounds，两侧留白就没了
-            final float SRC_W = 19f, X0 = 2.0f, X1 = 16.44f;
-            int rw = Math.round(b.width() * SRC_W / (X1 - X0));
-            int rl = b.left - Math.round(X0 / (X1 - X0) * b.width());
-            Rect r = new Rect(rl, b.top, rl + rw, b.bottom);
-            primary.setBounds(r);
+            // 原厂做法：整张素材画布直接铺进 View，墨迹两侧的留白原样留着，
+            // 间距完全交给 StatusIconContainer，四段视觉才会一致。
+            primary.setBounds(b);
             primary.setAlpha(alpha);
             primary.draw(c);
             if (secondary != null) {
-                secondary.setBounds(r);
+                secondary.setBounds(b);
                 secondary.setAlpha(alpha);
                 secondary.draw(c);
             }
@@ -122,7 +119,9 @@ public final class VStack extends Drawable {
     @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
 
     @Override public int getIntrinsicWidth() {
-        return Math.round(primary.getIntrinsicWidth() * (16.44f - 2.0f) / 19f);
+        int w = primary.getIntrinsicWidth();
+        if (secondary != null) w = Math.max(w, secondary.getIntrinsicWidth());
+        return w;
     }
 
     @Override public int getIntrinsicHeight() { return primary.getIntrinsicHeight(); }

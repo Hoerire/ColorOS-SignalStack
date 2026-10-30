@@ -445,9 +445,9 @@ public final class Engine {
 
         BUSY.set(Boolean.TRUE);
         try {
-            int padL = Math.round(4 * main.getResources().getDisplayMetrics().density);
-            if (main.getPaddingLeft() != padL) {
-                main.setPadding(padL, main.getPaddingTop(), main.getPaddingRight(), main.getPaddingBottom());
+            // 左右不留额外留白：状态栏靠容器统一间距，自带 padding 会把这一格撑宽、WiFi 被推歪
+            if (main.getPaddingLeft() != 0 || main.getPaddingRight() != 0) {
+                main.setPadding(0, main.getPaddingTop(), 0, main.getPaddingBottom());
             }
             MAIN = new java.lang.ref.WeakReference<>(main);
             attachLayoutWatcher(main);
@@ -744,9 +744,176 @@ public final class Engine {
                                 // 布局完成后重跑一次合成（下拉栏那份实例首帧可能是 0 宽，
                                 // 首帧失败后就再没人调用了，这里兜住）
                                 if (main instanceof ImageView) stack((ImageView) main);
+                                lockSpeedWidth(main);
+                                tightenRightPadding(main);
+                                alignEdges(main);
                             } catch (Throwable ignore) {}
                         }
                     });
+        } catch (Throwable ignore) {}
+    }
+
+    // ---------- 状态栏两端边距 ----------
+
+    private static final java.util.WeakHashMap<View, Integer> EDGE_BASE = new java.util.WeakHashMap<>();
+
+    /** 按类名在子树里找第一个可见、有尺寸的控件 */
+    private static View findByClass(View root, String key) {
+        if (root == null) return null;
+        if (root.getVisibility() == View.VISIBLE && root.getWidth() > 0
+                && root.getClass().getSimpleName().contains(key)) return root;
+        if (root instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) root;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View f = findByClass(g.getChildAt(i), key);
+                if (f != null) return f;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 时间与电池到屏幕两边的距离原本不等（左边宽右边窄）。
+     * 这里量出两侧实际差值，把宽的那一侧压回去，让两端边距相等。
+     */
+    private static void alignEdges(View main) {
+        try {
+            int sw = main.getResources().getDisplayMetrics().widthPixels;
+            // 向上找到「整条状态栏」那一层（宽度≈屏宽），别搜到下拉栏/锁屏里的副本
+            View root = main;
+            for (int i = 0; i < 12; i++) {
+                ViewParent p = root.getParent();
+                if (!(p instanceof View)) break;
+                View up = (View) p;
+                root = up;
+                if (up.getWidth() >= sw * 0.9) break;
+            }
+            View clock = findByClass(root, "StatClock");
+            View bat = findByClass(root, "Battery");
+            if (clock == null || bat == null) return;
+            int[] a = new int[2], b = new int[2];
+            clock.getLocationOnScreen(a);
+            bat.getLocationOnScreen(b);
+            int lg = a[0];
+            int rg = sw - (b[0] + bat.getWidth());
+            if (lg <= 0 || rg <= 0 || lg == rg) return;
+            // 只动时间那一侧：电池的位置由 nudgeBattery 负责，这里再碰它会来回打架
+            ViewGroup.LayoutParams lp = clock.getLayoutParams();
+            if (!(lp instanceof ViewGroup.MarginLayoutParams)) return;
+            ViewGroup.MarginLayoutParams m = (ViewGroup.MarginLayoutParams) lp;
+            Integer prev = EDGE_BASE.get(clock);
+            int base = prev == null ? m.getMarginStart() : prev;
+            Integer diff = EDGE_DIFF.get(clock);
+            if (prev == null || diff == null) {
+                // 差值只在首帧量一次。之后每帧重算会跟自己的修正互相追，时钟就会左右跳
+                EDGE_BASE.put(clock, base);
+                diff = lg - rg;
+                EDGE_DIFF.put(clock, diff);
+            }
+            int want = base - diff;
+            if (m.getMarginStart() == want) return;
+            m.setMarginStart(want);
+            clock.setLayoutParams(m);
+        } catch (Throwable ignore) {}
+    }
+
+
+
+
+    private static final java.util.WeakHashMap<View, Integer> SPEED_MAX_W = new java.util.WeakHashMap<>();
+    private static final java.util.WeakHashMap<ViewGroup, Integer> PAD_BASE = new java.util.WeakHashMap<>();
+    private static final java.util.WeakHashMap<View, Integer> EDGE_DIFF = new java.util.WeakHashMap<>();
+
+    /**
+     * 右侧那一排在容器里还剩一圈 padding。把它收掉，整排就会往右挪，
+     * 两端边距一起变小；电池不会超出容器，尖头也就不会缺。
+     */
+    private static void tightenRightPadding(View main) {
+        try {
+            int sw = main.getResources().getDisplayMetrics().widthPixels;
+            View root = main;
+            for (int i = 0; i < 12; i++) {
+                ViewParent p = root.getParent();
+                if (!(p instanceof View)) break;
+                View up = (View) p;
+                root = up;
+                if (up.getWidth() >= sw * 0.9) break;
+            }
+            View bat = findByClass(root, "Battery");
+            if (bat == null) return;
+            View cur = bat;
+            int cut = Math.round(8 * main.getResources().getDisplayMetrics().density);
+            for (int i = 0; i < 6; i++) {
+                ViewParent p = cur.getParent();
+                if (!(p instanceof ViewGroup)) return;
+                ViewGroup g = (ViewGroup) p;
+                int pad = g.getPaddingRight();
+                if (pad > 0) {
+                    Integer base = PAD_BASE.get(g);
+                    if (base == null) {
+                        base = pad;
+                        PAD_BASE.put(g, base);
+                    }
+                    int want = Math.max(0, base - cut);
+                    if (pad != want) {
+                        g.setPadding(g.getPaddingLeft(), g.getPaddingTop(), want, g.getPaddingBottom());
+                    }
+                    return;
+                }
+                cur = g;
+            }
+        } catch (Throwable ignore) {}
+    }
+
+
+    /** 状态栏那一格网速里的 TextView（母容器名字里带 network_speed） */
+    private static android.widget.TextView findSpeedText(View v, int depth) {
+        if (v == null || depth > 14) return null;
+        if (v instanceof android.widget.TextView && !(v instanceof android.widget.EditText)) {
+            ViewParent p = v.getParent();
+            if (p instanceof View) {
+                String n = entryName((View) p);
+                if (n != null && n.contains("network_speed")) return (android.widget.TextView) v;
+            }
+            CharSequence cs = ((android.widget.TextView) v).getText();
+            if (cs != null) {
+                String t = cs.toString();
+                if (t.contains("B/S") || t.contains("K/S") || t.contains("M/S")) return (android.widget.TextView) v;
+            }
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                android.widget.TextView r = findSpeedText(g.getChildAt(i), depth + 1);
+                if (r != null) return r;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 网速文字宽度随数字变（101 / 1.2M / 999），一变整排就跟着挪，把电池挤窄。
+     * 把这一格的宽度锁成观察到的最大值，数字再变也不再推动。
+     */
+    private static void lockSpeedWidth(View main) {
+        try {
+            int sw = main.getResources().getDisplayMetrics().widthPixels;
+            View root = main;
+            for (int i = 0; i < 12; i++) {
+                ViewParent p = root.getParent();
+                if (!(p instanceof View)) break;
+                View up = (View) p;
+                root = up;
+                if (up.getWidth() >= sw * 0.9) break;
+            }
+            android.widget.TextView tv = findSpeedText(root, 0);
+            if (tv == null || tv.getWidth() <= 0) return;
+            Integer mx = SPEED_MAX_W.get(tv);
+            if (mx == null || tv.getWidth() > mx) {
+                mx = tv.getWidth();
+                SPEED_MAX_W.put(tv, mx);
+            }
+            if (tv.getMinWidth() != mx) tv.setMinimumWidth(mx);
         } catch (Throwable ignore) {}
     }
 

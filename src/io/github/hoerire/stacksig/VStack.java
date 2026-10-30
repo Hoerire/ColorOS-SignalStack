@@ -23,7 +23,7 @@ public final class VStack extends Drawable {
     private static final float BADGE_H = 0.25f;     // 制式标高度占图标高度
     private static final float BADGE_RATIO = 1.38f; // 14.42 / 10.42
     private static final float BADGE_Y = 0.08f;
-    private static final float BADGE_X = 0.02f;
+    private static final float BADGE_X = 0.08f;   // 制式标左缘（墨迹在画布中从 x=2.28/19 起）
 
     private final Drawable primary;
     private final Drawable secondary;

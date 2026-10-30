@@ -30,10 +30,8 @@ public final class Res17 {
             apkPath = ai.sourceDir != null ? ai.sourceDir : ai.publicSourceDir;
             pkg = ai.packageName;
             ensure();
-            Log.d("Res17 ok apk=" + apkPath + " pkg=" + pkg);
             return res != null;
         } catch (Throwable t) {
-            Log.d("Res17 FAIL " + t);
             return false;
         }
     }
@@ -54,9 +52,7 @@ public final class Res17 {
             res = new Resources(am, dm, Resources.getSystem().getConfiguration());
             lastDpi = dm.densityDpi;
             CACHE.clear();
-            Log.d("Res17 rebuild dpi=" + dm.densityDpi + " density=" + dm.density);
         } catch (Throwable t) {
-            Log.d("Res17 ensure FAIL " + t);
         }
     }
 
@@ -67,14 +63,12 @@ public final class Res17 {
         try {
             int id = res.getIdentifier(name, "drawable", pkg);
             if (id == 0) {
-                Log.d("Res17 miss " + name);
                 return null;
             }
             Drawable d = res.getDrawable(id, null);
             if (d == null) return null;
             return d.getConstantState() != null ? d.getConstantState().newDrawable().mutate() : d;
         } catch (Throwable t) {
-            Log.d("Res17 err " + name + " " + t);
             return null;
         }
     }

@@ -1,7 +1,6 @@
 package io.github.hoerire.stacksig;
 
 import android.content.Context;
-import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Drawable;
 import android.view.View;
@@ -101,10 +100,8 @@ public final class Engine {
                     return r;
                 }
             });
-            Log.d("hook OK onDarkChanged");
             return 1;
         } catch (Throwable t) {
-            Log.d("hook FAIL onDarkChanged " + t);
             return 0;
         }
     }
@@ -134,10 +131,8 @@ public final class Engine {
                     return r;
                 }
             });
-            Log.d("hook OK TextView.setTextColor");
             return 1;
         } catch (Throwable t) {
-            Log.d("hook FAIL setTextColor " + t);
             return 0;
         }
     }
@@ -163,7 +158,6 @@ public final class Engine {
      * 真正把颜色落到图标上的就是 setIconColor / setColorInternal。
      * 挂在这里 = 和系统同一调用栈里换色，不存在「晚一拍」。
      */
-    private static volatile int SYSTEM_ICON_COLOR = 0;
 
             /** 系统刚给的图标色：记下来，并立刻刷到我们自己的 drawable 上 */
         /** 把原厂相关类的真实方法签名 dump 出来，照着它 hook，别再猜 */
@@ -187,10 +181,8 @@ public final class Engine {
                     return r;
                 }
             });
-            Log.d("hook OK setVisibility");
             return 1;
         } catch (Throwable t) {
-            Log.d("hook FAIL setVisibility " + t);
             return 0;
         }
     }
@@ -199,10 +191,8 @@ public final class Engine {
         try {
             Method md = ImageView.class.getDeclaredMethod(name, sig);
             m.hook(md).intercept(new H());
-            Log.d("hook OK " + name);
             return 1;
         } catch (Throwable t) {
-            Log.d("hook FAIL " + name + " -> " + t);
             return 0;
         }
     }
@@ -222,9 +212,6 @@ public final class Engine {
                 String n = entryName(iv);
                 if (n == null) return r;
 
-                if (SEEN.size() < 40 && n.contains("signal") && SEEN.add(n)) {
-                    Log.d("seen view id-name=" + n + " cls=" + iv.getClass().getSimpleName());
-                }
                 if (n.contains(KEY)) {
                     if ("setImageResource".equals(c.getExecutable().getName())) {
                         Object arg = c.getArg(0);
@@ -333,10 +320,6 @@ public final class Engine {
                             if (hit && fromNetSpeed()) {
                                 android.os.Handler h = (android.os.Handler) c.getThisObject();
                                 android.os.Message msg = (android.os.Message) c.getArg(0);
-                                if (DBG.size() < 400 && DBG.add("nd" + d)) {
-                                    Log.d("netspeed reschedule " + d + " -> " + NETSPEED_INTERVAL
-                                            + " " + callerHint());
-                                }
                                 return h.sendMessageAtTime(msg,
                                         android.os.SystemClock.uptimeMillis() + NETSPEED_INTERVAL);
                             }
@@ -345,10 +328,8 @@ public final class Engine {
                     return c.proceed();
                 }
             });
-            Log.d("hook OK Handler.sendMessageAtTime(netspeed)");
             return 1;
         } catch (Throwable t) {
-            Log.d("hook FAIL sendMessageAtTime " + t);
             return 0;
         }
     }
@@ -389,7 +370,7 @@ public final class Engine {
                 node = par;
             }
         }
-        if (container == null) { Log.d("skip: no container"); retry(iv, 1); return; }
+        if (container == null) { retry(iv, 1); return; }
 
         View primaryRoot = null;
         View secondRoot = null;
@@ -399,14 +380,14 @@ public final class Engine {
             if (primaryRoot == null) primaryRoot = ch;
             else if (secondRoot == null) { secondRoot = ch; break; }
         }
-        if (primaryRoot == null) { Log.d("skip: no primaryRoot"); retry(iv, 1); return; }
+        if (primaryRoot == null) { retry(iv, 1); return; }
         // 双卡时只有"主卡那一层"负责合成；单卡（secondRoot==null）不需要这个限制，
         // 否则下拉通知栏里的那份实例会被误判掉。
         if (secondRoot != null && !isSelfOrDescendant(primaryRoot, iv)) return;
 
         ImageView main = findSignal(primaryRoot);
         ImageView sec = secondRoot == null ? null : findSignal(secondRoot);
-        if (main == null) { Log.d("skip: main null"); return; }
+        if (main == null) return;
 
         applyWifiRule(main);
 
@@ -419,7 +400,6 @@ public final class Engine {
             if (b instanceof VStack) b = ORIG.get(sec);
         }
         if (a == null || (sec != null && b == null)) {
-            Log.d("skip: a=" + (a != null) + " b=" + (b != null) + " sec=" + (sec != null));
             return;
         }
 
@@ -443,32 +423,8 @@ public final class Engine {
             ls = -1;
         }
         String sig = lp + "/" + ls + "/" + (wifi ? "w" : "m");
-        if (DBG.size() < 300) {
-            String hv = Integer.toHexString(System.identityHashCode(iv));
-            String hc = Integer.toHexString(System.identityHashCode(container));
-            String hp = Integer.toHexString(System.identityHashCode(primaryRoot));
-            int hs = secondRoot == null ? 0 : System.identityHashCode(secondRoot);
-            if (DBG.add("x" + hv + hp + hs)) {
-            }
-        }
 
         String idHash = Integer.toHexString(System.identityHashCode(main));
-        if (SEEN.size() < 60 && SEEN.add("chain:" + idHash)) {
-            StringBuilder sb = new StringBuilder();
-            View cn = main;
-            for (int i = 0; i < 5; i++) {
-                sb.append('[').append(cn.getClass().getSimpleName())
-                  .append(' ').append(entryName(cn))
-                  .append(" w=").append(cn.getWidth())
-                  .append(" v=").append(cn.getVisibility()).append(']');
-                ViewParent p2 = cn.getParent();
-                if (!(p2 instanceof View)) break;
-                cn = (View) p2;
-            }
-            Log.d("chain " + idHash + " attach=" + main.isAttachedToWindow() + " " + sb);
-        }
-        Log.d("compose " + idHash + " sig=" + sig + " w=" + main.getWidth() + " h=" + main.getHeight()
-                + " already=" + (main.getDrawable() instanceof VStack));
         boolean already = main.getDrawable() instanceof VStack;
         if (already && sig.equals(LAST.get(main))) {
             if (secondRoot != null) collapse(secondRoot);
@@ -525,7 +481,6 @@ public final class Engine {
         if (pa == null || (ls >= 0 && pb == null)) return new StackDraw(a, b);
 
         String badgeName = wifi ? null : badgeNameFor(main.getContext());
-        if (badgeName != null) Log.d("badge type -> " + badgeName);
         Drawable badge = badgeName == null ? null : Res17.get(badgeName);
 
         VStack v = new VStack(pa, pb, main.getImageTintList(), badge);
@@ -610,8 +565,6 @@ public final class Engine {
     }
 
     private static int lastKnownLevel = -1;
-    private static final java.util.HashSet<String> SEEN = new java.util.HashSet<>();
-    private static final java.util.HashSet<String> DBG = new java.util.HashSet<>();
     private static boolean tickerStarted;
 
     /**
@@ -635,7 +588,6 @@ public final class Engine {
                 h.postDelayed(this, 1000);
             }
         }, 1500);
-        Log.d("color ticker started 150ms");
     }   // 强引用，抓到就记住
     private static java.lang.ref.WeakReference<VStack> CUR_VS;
     static final float BADGE_X_FRAC = 0.105f;      // 5G 左边界（与 VStack 默认一致）
@@ -682,7 +634,6 @@ public final class Engine {
     private static final java.util.WeakHashMap<View, Boolean> WATCHED = new java.util.WeakHashMap<>();
     private static long lastLayoutPass = 0;
     private static long lastBuildMs = 0;
-    private static final java.util.WeakHashMap<ImageView, Long> POSTED = new java.util.WeakHashMap<>();
 
     /**
      * 让「网速 ↔ 信号」的间距等于「信号 ↔ 电池」的间距：
@@ -695,7 +646,6 @@ public final class Engine {
      * 不新增任何 view，只改已有 view 的 drawable / 可见性，所以不会打乱布局。
      */
     /** 从主信号 view 往上找到状态栏容器，再递归找 wifi 图标 */
-    private static java.lang.ref.WeakReference<android.widget.TextView> SPEED_TXT;
 
     /**
      * 网速那一格「视觉高度」：数字行 + 单位行的实际墨迹跨度（不是 View 高度，
@@ -734,11 +684,8 @@ public final class Engine {
      * 表现出来就是「白一会儿才变黑」。这里在状态栏的 preDraw 里直接读一次网速文字色，
      * 和上次不同就重绘 —— 最多晚一帧（16ms），与系统换色同步。
      */
-    private static final java.util.WeakHashMap<ImageView, Boolean> CWATCH = new java.util.WeakHashMap<>();
-    private static final java.util.WeakHashMap<ImageView, Integer> LASTC = new java.util.WeakHashMap<>();
 
     /** 系统下发的状态栏明暗强度（0=深色图标，1=浅色图标） */
-    private static volatile float DARK_INTENSITY = -1f;
 
         /** 原厂的状态栏明暗强度：只作为「宿主没有 tint」时的兜底 */
     private static volatile float FALLBACK_DARK = -1f;
@@ -766,7 +713,6 @@ public final class Engine {
      * 直接读原厂 StatusBarIconView 内部的 mIconColor —— 这就是系统给这个图标设的颜色，
      * 和同排其它图标是同一个值，不依赖任何回调时机。
      */
-    private static final java.util.WeakHashMap<ImageView, android.widget.TextView> SPEED_BY_MAIN = new java.util.WeakHashMap<>();
 
     /**
      * 只取「跟这个信号图标同一排」的网速文字。
@@ -776,7 +722,6 @@ public final class Engine {
      * 结果就是「App 里下拉变黑、桌面下拉正常」。
      * 从 main 往上找兄弟容器，拿到的必然是同一条状态栏里的那一格。
      */
-    private static java.lang.ref.WeakReference<ImageView> BAT_REF;
 
     /**
      * 同一排电池图标当前的 tint —— 这就是系统给整排状态栏图标上的颜色。
@@ -857,9 +802,6 @@ public final class Engine {
                   .append(" w=").append(ch.getWidth()).append(']');
                 if (ch == primaryRoot) continue;
                 if (hasSig) collapse(ch);
-            }
-            if (SEEN.size() < 40 && SEEN.add("kids:" + Integer.toHexString(System.identityHashCode(container)))) {
-                Log.d(sb.toString());
             }
         } catch (Throwable ignore) {}
     }
@@ -1036,9 +978,7 @@ public final class Engine {
                         @Override public void onCapabilitiesChanged(android.net.Network n,
                                 android.net.NetworkCapabilities c) { refreshAll(); }
                     });
-            Log.d("net callback installed");
         } catch (Throwable t) {
-            Log.d("net callback FAIL " + t);
         }
     }
 

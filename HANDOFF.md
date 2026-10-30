@@ -208,6 +208,43 @@ git -C release/com.hg.stacksig -c safe.directory='*' push origin main
 
 三个 release 都要传 `ColorOSStackSig-v<ver>.apk`。旧版本的 APK 从私人仓删除，只留最新的。
 
+
+---
+
+## 8.1 发布用凭据（本机文件，勿外传）
+
+GitHub Personal Access Token（repo 权限，三个仓库共用）：
+
+```
+<GITHUB_TOKEN>
+```
+
+它已经内嵌在两个 release 目录的 remote URL 里，正常 push 不需要再输入：
+
+```sh
+git -C /storage/emulated/0/DeepSeek/release/io.github.hoerire.stacksig remote -v
+# origin https://x-access-token:ghp_xxx@github.com/Hoerire/ColorOS-SignalStack.git
+# org    https://x-access-token:ghp_xxx@github.com/Xposed-Modules-Repo/io.github.hoerire.stacksig.git
+```
+
+走 API（建 release、传 asset、查版本）时：
+
+```sh
+TOKEN=<GITHUB_TOKEN>
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "https://api.github.com/repos/Hoerire/ColorOS-SignalStack/releases?per_page=1"
+```
+
+顺带记一下其它发布环境里的值：
+
+| 用途 | 值 |
+|---|---|
+| 签名 keystore | `/storage/emulated/0/源码/zafiro-15-1.8.1-Fork/app/src/main/assets/buildkit/debug.keystore` |
+| storepass / keypass | `android` / `android` |
+| key alias | `androiddebugkey` |
+| libxposed 接口 jar | `/storage/emulated/0/DeepSeek/build/stub/libxposed-api-102.jar` |
+
+> 这份文件只留在本机，推仓库时会把 token 换成 `<GITHUB_TOKEN>` 占位符。
 ---
 
 ## 9. 排查手册

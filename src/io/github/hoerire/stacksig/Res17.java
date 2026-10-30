@@ -20,27 +20,49 @@ public final class Res17 {
 
     private Res17() {}
 
+    private static String apkPath;
+    private static int lastDpi = -1;
+
     public static synchronized boolean init(XposedModule m) {
-        if (res != null) return true;
+        if (res != null && apkPath != null) return true;
         try {
             ApplicationInfo ai = m.getModuleApplicationInfo();
-            String apk = ai.sourceDir != null ? ai.sourceDir : ai.publicSourceDir;
+            apkPath = ai.sourceDir != null ? ai.sourceDir : ai.publicSourceDir;
             pkg = ai.packageName;
-            AssetManager am = AssetManager.class.newInstance();
-            Method add = AssetManager.class.getMethod("addAssetPath", String.class);
-            add.invoke(am, apk);
-            DisplayMetrics dm = Resources.getSystem().getDisplayMetrics();
-            res = new Resources(am, dm, Resources.getSystem().getConfiguration());
-            Log.d("Res17 ok apk=" + apk + " pkg=" + pkg);
-            return true;
+            ensure();
+            Log.d("Res17 ok apk=" + apkPath + " pkg=" + pkg);
+            return res != null;
         } catch (Throwable t) {
             Log.d("Res17 FAIL " + t);
             return false;
         }
     }
 
+    /**
+     * 资源表按当前 density 建。用户改「显示大小 / 分辨率」后 densityDpi 会变，
+     * 矢量图的 intrinsic 是按 dp*density 算出来的，不重建就会一直用旧 dpi 的尺寸
+     * —— 显示出来比邻居大一圈。
+     */
+    private static synchronized void ensure() {
+        try {
+            DisplayMetrics dm = Resources.getSystem().getDisplayMetrics();
+            if (res != null && dm.densityDpi == lastDpi) return;
+            if (apkPath == null) return;
+            AssetManager am = AssetManager.class.newInstance();
+            Method add = AssetManager.class.getMethod("addAssetPath", String.class);
+            add.invoke(am, apkPath);
+            res = new Resources(am, dm, Resources.getSystem().getConfiguration());
+            lastDpi = dm.densityDpi;
+            CACHE.clear();
+            Log.d("Res17 rebuild dpi=" + dm.densityDpi + " density=" + dm.density);
+        } catch (Throwable t) {
+            Log.d("Res17 ensure FAIL " + t);
+        }
+    }
+
     /** 取一张 C17 矢量图（返回新实例，避免共享状态） */
     public static Drawable get(String name) {
+        ensure();
         if (res == null) return null;
         try {
             int id = res.getIdentifier(name, "drawable", pkg);

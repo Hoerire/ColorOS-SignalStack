@@ -32,7 +32,11 @@ public final class StackSigModule extends XposedModule {
         dump("onPackageLoaded " + pkg);
         if (!"com.android.systemui".equals(pkg)) return;
         try {
-            int n = Engine.install(this, null);
+            ClassLoader cl = null;
+            try { cl = p.getClassLoader(); } catch (Throwable ignore) {}
+            if (cl == null) { try { cl = p.getDefaultClassLoader(); } catch (Throwable ignore) {} }
+            dump("classLoader=" + cl);
+            int n = Engine.install(this, cl);
             try { log("STACKSIG Engine hooks=" + n); } catch (Throwable ignore) {}
             dump("Engine hooks=" + n);
         } catch (Throwable t) {

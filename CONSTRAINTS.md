@@ -170,12 +170,89 @@ su -c "grep 'StackSig' $L" | tail -20
 
 ## 七、当前状态
 
-**已发布**：v1.9 / versionCode 46。
+**已提交（未推送）**：v1.10 / versionCode 47。
+内容：制式标独立 View + 网络指示器下移 + 单双卡自适应。
+构建产物：`/storage/emulated/0/DeepSeek/out-restored/signed.apk`。
 - 源码仓库：[Hoerire/ColorOS-SignalStack](https://github.com/Hoerire/ColorOS-SignalStack)（tag `1-1.9`）
 - LSPosed 仓库：[io.github.hoerire.stacksig](https://github.com/Xposed-Modules-Repo/io.github.hoerire.stacksig)（tag `46-1.9`）
 
 **注意**：versionName 是 1.9，versionCode 是 46 —— code 必须递增，
 否则装过 45 的设备会认为没更新，`pm install -r` 直接跳过。
+
+### v1.10（未发布）制式标独立视图 + 网络指示器下移
+
+**制式标不再是 drawable 里的一张小图，改成挂在 `mobile_combo` 上的独立 TextView。**
+
+原因：drawable 出不了 View 边界。`mobile_signal` 只有 67px 宽，箭头在它左边 24px 处，
+画在 drawable 左上的制式标永远追不上箭头，左缘对不齐。
+
+**摆位（560dpi 实测像素）**
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `leftMargin` | 1.15dp | 5G 左缘与箭头上三角左缘齐平（均为 1039） |
+| `topMargin` | 2dp | 顶部与闹钟齐平 |
+| `textSize` | 6.5dp | 再加宽会顶到信号柱 |
+
+**箭头下移（`dropDataInout` / `pushDown`）**
+
+```java
+v.setTranslationY(7dp * density * columnRatio());
+```
+
+- **只能用 `translationY`，绝不能改 `LayoutParams`**。用 `topMargin` 会触发重新
+  measure + scaleType，箭头被按新高度缩放（实测 h 从 49 掉到 33），看起来就是「箭头变小了」。
+- `columnRatio()` = 信号视图高 / 56px（双卡基准）。单卡用 `ic_s17_single_*` 满高素材，
+  柱子更高，按比例放大才不会偏高。
+
+**制式刷新只有一条通道**
+
+`startBadgeTicker` 每 2.5 秒比对 `badgeLabel(ctx)`，变了就 `pushBadgeLabel` 直接改文本。
+`stack()` 里**只登记 combo，不写文本**；`sig` 里**不含制式** ——
+两处都写会出现两套刷新互相打架，制式还会连带重建 drawable 白闪一下。
+
+**5GA 只看数据卡**
+
+```java
+int subId = SubscriptionManager.getDefaultDataSubscriptionId();
+overrideNrAdvanced(ctx, subId);   // 只问这一张
+```
+
+不要扫所有 subId。实测双卡时 5GA 报在 subId=1、默认数据卡是 subId=2，
+扫所有卡会显示与实际不符的制式。系统状态用
+`dumpsys telephony.registry | grep mTelephonyDisplayInfo` 核对：
+`overrideNetwork=NONE` → 5G，`NR_ADVANCED` → 5GA。
+
+**颜色必须在时钟换色的同一调用栈里刷**
+
+状态栏换色时系统只回调它自己的图标。挂在 `TextView.setTextColor` 上，
+遇到 `clock` 就调 `syncAllBadgeColors`。取色优先级：
+**时钟文字色 → 同排 ImageView tint → 信号图标 tint**。1 秒 ticker 只作兜底。
+
+**新建 TextView 必须等容器量完**
+
+SystemUI 刚重启时 `stack()` 在 `mobile_combo` measure 完之前就被调起来，
+此时 combo 尺寸为 0，TextView 会堆在信号柱正上方，等下次布局才归位。
+用 `attachBadgeWhenMeasured`：`getWidth()>0 && getHeight()>0` 才建，否则挂 `OnLayoutChangeListener`。
+
+---
+
+**踩过的坑（本轮）**
+
+1. `su -c screencap` 在 root 域链接不到 `libbinder_ndk.so`，**静默失败并保留旧图** ——
+   前面几次「移多了/移少了」的误判全是看了陈旧截图。正确写法：
+   `su -c 'LD_LIBRARY_PATH=/system/lib64 screencap -p out.png'`
+2. `badgeLabel` 里必须先判 `5ga` 再判 `5g`，否则 `ic_s17_5ga` 含 `5g`，5GA 被吞成 5G。
+3. **整理箭头时不要按名字遍历整棵子树**。WiFi 与移动数据两个 `inout` 在同一个祖先下，
+   按名字匹配会把 WiFi 那一支也清掉，实测 WiFi 图标整块消失。
+   只碰 `DROPPED` 里登记过的（= `pushDown` 亲自改过的）view。
+4. **WiFi 上下线时不要调 `refreshAll()`**。系统正在切换自己的图标，
+   我们重建信号 drawable 会和它抢同一帧，WiFi 图标要好几秒才出来。
+   那一刻只 permit `pushBadgeLabel`（改文本）+ `invalidateSelf`（纯重绘）。
+5. **改完必须核对截图的新鲜度**。`su -c screencap` 失败时静默保留旧图，
+   前后两张 md5 一样就说明看的是旧画面，据此调参数会越调越偏。
+
+---
 
 ### 代码结构（v1.9 重构后）
 

@@ -107,13 +107,6 @@ public final class Engine {
     }
 
     /**
-     * 系统给状态栏图标重新上色（切主题、换壁纸、进锁屏）时会调用 setImageTintList /
-     * setColorFilter。挂在这里就能在系统上色的同一帧把我们的 drawable 也重绘一次，
-     * 不用等兜底 ticker —— 颜色跟系统同步，没有半拍延迟。
-     */
-        /** 系统给了明确颜色：直接用它，并等下一帧再重绘（读时钟色更准） */
-            /** 时钟文字色一变（状态栏图标换色），立刻重算我们的图标 */
-    /**
      * 网速数字变宽时整块往左推、右边界不动，这样位数变化不会左右蹦。
      * 容器宽度改 wrap_content 并靠右沉底；两个 TextView 都靠右，
      * 单位文字固定不变，所以看上去只有上面那行在往左长。
@@ -193,6 +186,9 @@ public final class Engine {
                             String n = entryName((View) t);
                             if (n != null && n.contains("clock")) {
                                 refreshAll();
+                                // 时钟换色 = 系统刚给状态栏下发新颜色。此刻紧跟在同一调用栈里
+                                // 给制式标取色，才能和同排图标同时变色；等 ticker 就是慢半拍。
+                                syncAllBadgeColors((android.widget.TextView) t);
                             }
                         }
                     } catch (Throwable ignore) {}
@@ -211,12 +207,9 @@ public final class Engine {
      * 收起副卡那一份时，系统（尤其在重建状态栏、展开控制中心时）会把它的可见性改回
      * VISIBLE，光靠 setImageDrawable 那条 hook 拦不住 —— 结果就是两个信号图标并排。
      * 这里在每次可见性变化后检查祖先是否被标记隐藏，是就按回去。
-     */
     /**
      * 系统给状态栏图标重设 tint 时（收起通知面板、回桌面、切深浅色）立刻重绘我们自己的
      * drawable —— 只借这个时机刷新，不采纳它的颜色值（颜色源仍然是网速文字色）。
-     * 没有这条，就要等兜底 ticker，肉眼就是「白了一下才变黑」。
-     */
         /**
      * 原厂换色链路（反射出来的真实签名）：
      *   StatusBarIconView.setIconColor(int, boolean)
@@ -227,8 +220,6 @@ public final class Engine {
      * 挂在这里 = 和系统同一调用栈里换色，不存在「晚一拍」。
      */
 
-            /** 系统刚给的图标色：记下来，并立刻刷到我们自己的 drawable 上 */
-        /** 把原厂相关类的真实方法签名 dump 出来，照着它 hook，别再猜 */
     private static int hookVisibility(XposedModule m) {
         try {
             Method md = View.class.getDeclaredMethod("setVisibility", int.class);
@@ -317,8 +308,12 @@ public final class Engine {
                         }
                     });
                 } else if (n.contains("wifi")) {
-                    // 断/连 WiFi 时系统会刷新 wifi 图标，顺势让信号图标重算
-                    refreshAll();
+                    // 断/连 WiFi 时系统会刷新 wifi 图标，顺势让信号图标重算。
+                    // 制式标（5G）要跟着立刻收/放，不能等 ticker 那 2.5 秒 ——
+                    // 切 WiFi 时那几秒里 5G 会停在柱子上，看着就是「没反应过来」。
+                    // 制式标立刻收/放，但不要 refreshAll：那会让信号图标重建，
+                    // 和系统正在做的 WiFi 图标切换挤在同一帧，WiFi 会晚好几秒才出来。
+                    pushBadgeLabel(iv.getContext());
                 }
             } catch (Throwable ignore) {}
             return r;
@@ -392,6 +387,24 @@ public final class Engine {
         if (main == null) return;
 
         applyWifiRule(main);
+        // 制式标挂在 mobile_combo 上。这里只负责「登记」这个容器，
+        // 文本一律由 startBadgeTicker 那条唯一通道写入 —— 两处都写会出现两套刷新互相打架。
+        {
+            ViewParent cp = main.getParent();
+            while (cp instanceof View && !"mobile_combo".equals(entryName((View) cp))) {
+                ViewParent up = ((View) cp).getParent();
+                if (!(up instanceof View)) { cp = null; break; }
+                cp = up;
+            }
+            if (cp instanceof ViewGroup) {
+                ViewGroup g = (ViewGroup) cp;
+                boolean fresh = !BADGE_COMBOS.containsKey(g);
+                BADGE_COMBOS.put(g, Boolean.TRUE);
+                // 新容器（状态栏重建／下拉栏首次出现）先填一次当前值，
+                // 否则要等到制式下次变化才有文字。已登记过的完全不碰，避免两套写入口。
+                if (fresh) attachBadgeWhenMeasured(g, main.getContext());
+            }
+        }
 
         Drawable a = ORIG.get(main);
         if (a == null) a = main.getDrawable();
@@ -424,14 +437,10 @@ public final class Engine {
         } else {
             ls = -1;
         }
-        // 重建条件必须带上「网络制式」：只比信号等级的话，切 4G/5G 时等级没变，
-        // sig 相同就直接 return，制式标会永远停在旧值（下拉栏走系统 DisplayInfo 所以是对的）。
-        String badgeKey = "";
-        {
-            android.content.Context bc = main.getContext();
-            badgeKey = wifi ? "" : badgeNameFor(bc);
-        }
-        String sig = lp + "/" + ls + "/" + (wifi ? "w" : "m") + "/" + badgeKey;
+        // sig 只描述「信号本身」：等级、单双卡、WiFi 与否。
+        // 制式不再进 sig —— 制式标已经是独立 TextView，由 startBadgeTicker 单独刷新。
+        // 把制式塞进来只会让 drawable 因为一个跟它无关的变化白白重建（闪一下）。
+        String sig = lp + "/" + ls + "/" + (wifi ? "w" : "m");
 
         String idHash = Integer.toHexString(System.identityHashCode(main));
         boolean already = main.getDrawable() instanceof VStack;
@@ -472,6 +481,9 @@ public final class Engine {
             // 同一个 combo 内部还有第二份 mobile_signal（副卡），外层容器收不掉它
             collapseInnerSignals(primaryRoot, main);
             tighten(main);
+            // 状态已确定，再补一次箭头位置：WiFi↔移动数据切换时
+            // 前面 applyWifiRule 读到的 wifi 标志可能还是旧值，箭头会漏掉一次下移。
+            try { dropDataInout(main); } catch (Throwable ignore) {}
         } finally {
             BUSY.set(Boolean.FALSE);
         }
@@ -491,8 +503,8 @@ public final class Engine {
         Drawable pb = ls < 0 ? null : Res17.get(Res17.secondaryName(family, ls));
         if (pa == null || (ls >= 0 && pb == null)) return new StackDraw(a, b);
 
-        String badgeName = wifi ? null : badgeNameFor(main.getContext());
-        Drawable badge = badgeName == null ? null : Res17.get(badgeName);
+        // 制式标是独立 TextView（见 attachBadgeText），drawable 里不画
+        Drawable badge = null;
 
         VStack v = new VStack(pa, pb, main.getImageTintList(), badge);
         v.setHost(main);
@@ -505,51 +517,38 @@ public final class Engine {
         return v;
     }
 
-    /** 永久隐藏信号旁边的小制式图（制式标已画进图标） */
-    /** 按当前数据网络制式选制式标（2G/3G/4G/5G/5GA） */
-    /**
-     * 取「正在承载数据那张卡」的 TelephonyManager。
-     *
-     * 双卡机器上 getDataNetworkType() 拿的是默认 subId 的类型，未必是真正跑数据的那张
-     * —— 表现就是拉到 5G 却还显示 4G（下拉控制中心那份走的是系统 DisplayInfo，所以是对的）。
-     * 这里先按 SubscriptionManager 的默认数据卡建实例，拿不到再退回整机那份。
-     */
-    private static android.telephony.TelephonyManager dataTelephonyManager(
-            android.content.Context ctx) {
-        try {
-            android.telephony.SubscriptionManager sm =
-                    android.telephony.SubscriptionManager.from(ctx);
-            int subId = android.telephony.SubscriptionManager.getDefaultDataSubscriptionId();
-            if (subId == android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
-                java.util.List<android.telephony.SubscriptionInfo> subs =
-                        sm.getActiveSubscriptionInfoList();
-                if (subs != null && !subs.isEmpty()) {
-                    subId = subs.get(0).getSubscriptionId();
-                }
-            }
-            if (subId != android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
-                android.telephony.TelephonyManager base =
-                        (android.telephony.TelephonyManager) ctx.getSystemService(
-                                android.content.Context.TELEPHONY_SERVICE);
-                if (base != null) return base.createForSubscriptionId(subId);
-            }
-        } catch (Throwable ignore) {}
-        try {
-            return (android.telephony.TelephonyManager) ctx.getSystemService(
-                    android.content.Context.TELEPHONY_SERVICE);
-        } catch (Throwable ignore) {
-            return null;
-        }
-    }
+    // ==================== 制式标独立 View ====================
 
     /**
-     * 按当前数据网络制式选制式标。
+     * 把制式标（5G/4G）做成独立 View，挂进 mobile_combo。
      *
-     * 5GA（5G-Advanced）在原厂是「NR 网络 + 已聚合多个 NR 载波」时才显示。
-     * getDataNetworkType() 只给得出 NR，给不出载波数，所以要读 TelephonyDisplayInfo
-     * 的 overrideNetworkType：系统把它算成 NR_ADVANCED 就说明要画 5GA。
-     * 拿不到那块信息时退回 5G —— 宁可少画，不能错画。
+     * 以前画在信号 drawable 的左上角，但 drawable 出不了 View 边界，
+     * 5G 永远追不上左侧 24px 处的网络指示器箭头。
+     * 现在改成独立 TextView 摆到箭头正上方，两者左缘就能真正对齐。
+     *
+     * 只往 mobile_combo（普通 ViewGroup）里加，**不碰 StatusIconContainer** ——
+     * 那个容器 onMeasure 会把每个子 View 强转成 StatusIconDisplayable，加进去必崩。
+    /**
+     * 制式标的左偏移（dp）。
+     *
+     * 只调这一个数就能左右移动制式标，箭头位置完全不动 —— 单向调整才不会两边拉扯。
+     * 560dpi 下 1dp = 3.5px。
      */
+    private static final float BADGE_LEFT_DP = 2.05f;
+
+    private static final java.util.WeakHashMap<ViewGroup, android.widget.TextView> BADGE_VIEWS =
+            new java.util.WeakHashMap<>();
+
+    /** 挂过制式标的 combo，制式一变直接刷它，不必等信号图标重画 */
+    private static final java.util.WeakHashMap<ViewGroup, Boolean> BADGE_COMBOS =
+            new java.util.WeakHashMap<>();
+
+    /**
+     * 制式 → 显示文字。
+     *
+     * 顺序要紧：先判 5ga 再判 5g，否则 "ic_s17_5ga" 里也含 "5g"，5GA 会被吞成 5G。
+     * WiFi 连接时移动数据不跑流量，制式标直接收掉（返回空串）。
+    /** 按当前数据网络制式选制式标（2G/3G/4G/5G/5GA） */
     private static String badgeNameFor(android.content.Context ctx) {
         try {
             android.telephony.TelephonyManager tm = dataTelephonyManager(ctx);
@@ -573,42 +572,294 @@ public final class Engine {
     }
 
     /**
-     * 当前 NR 是否已升级到 5G-A。
-     *
-     * 系统把这个结论放在 TelephonyDisplayInfo.overrideNetworkType 里
-     * （OVERRIDE_NETWORK_TYPE_NR_ADVANCED = 5）。这里用反射读它：
-     * 拿不到就返回 false，绝不影响普通 5G 的显示。
+     * 取「正在承载数据那张卡」的 TelephonyManager。
      */
+    private static android.telephony.TelephonyManager dataTelephonyManager(
+            android.content.Context ctx) {
+        try {
+            int subId = android.telephony.SubscriptionManager.getDefaultDataSubscriptionId();
+            if (subId != android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                android.telephony.TelephonyManager base =
+                        (android.telephony.TelephonyManager) ctx.getSystemService(
+                                android.content.Context.TELEPHONY_SERVICE);
+                if (base != null) return base.createForSubscriptionId(subId);
+            }
+        } catch (Throwable ignore) {}
+        try {
+            return (android.telephony.TelephonyManager) ctx.getSystemService(
+                    android.content.Context.TELEPHONY_SERVICE);
+        } catch (Throwable ignore) {
+            return null;
+        }
+    }
+
+    /** 当前 NR 是否已升级到 5G-A（只看数据卡） */
     private static boolean isNrAdvanced(android.content.Context ctx) {
+        int subId = -1;
+        try {
+            subId = android.telephony.SubscriptionManager.getDefaultDataSubscriptionId();
+        } catch (Throwable ignore) {}
+        return overrideNrAdvanced(ctx, subId);
+    }
+
+    private static boolean overrideNrAdvanced(android.content.Context ctx, int subId) {
         try {
             android.telephony.TelephonyManager tm = (android.telephony.TelephonyManager)
                     ctx.getSystemService(android.content.Context.TELEPHONY_SERVICE);
             if (tm == null) return false;
+            if (subId > 0) {
+                try { tm = tm.createForSubscriptionId(subId); }
+                catch (Throwable ignore) {}
+            }
             Object di = null;
             try {
                 java.lang.reflect.Method m = tm.getClass().getMethod("getTelephonyDisplayInfo");
                 di = m.invoke(tm);
             } catch (Throwable ignore) {}
-            if (di == null) {
-                // 新接口：getNetworkType(boolean) 后接 TelephonyDisplayInfo 的路径不可靠，
-                // 退而用隐藏字段
-                java.lang.reflect.Field f = tm.getClass().getDeclaredField("mTelephonyDisplayInfo");
-                f.setAccessible(true);
-                di = f.get(tm);
-            }
             if (di == null) return false;
             for (java.lang.reflect.Field f : di.getClass().getDeclaredFields()) {
                 if (!f.getName().contains("overrideNetworkType")) continue;
                 f.setAccessible(true);
                 Object v = f.get(di);
                 if (!(v instanceof Integer)) continue;
-                int t = (Integer) v;
-                // OVERRIDE_NETWORK_TYPE_NR_ADVANCED = 5
-                if (t == 5) return true;
+                if ((Integer) v == 5) return true;
             }
         } catch (Throwable ignore) {}
         return false;
     }
+
+    static String badgeLabel(android.content.Context ctx) {
+        if (ctx == null) return "";
+        if (isWifiConnected(ctx)) return "";
+        String n = badgeNameFor(ctx);
+        if (n == null) return "";
+        if (n.contains("5ga")) return "5GA";
+        if (n.contains("5g")) return "5G";
+        if (n.contains("4g")) return "4G";
+        if (n.contains("3g")) return "3G";
+        return "2G";
+    }
+
+    /** 制式变化时直接把 label 推给已经挂上的 TextView，绕过 stack() 的去重 */
+    private static void pushBadgeLabel(android.content.Context ctx) {
+        if (BADGE_COMBOS.isEmpty()) return;
+        startBadgeColorTicker();
+        String label = badgeLabel(ctx);
+        for (final ViewGroup g : BADGE_COMBOS.keySet()) {
+            if (g == null) continue;
+            // 写文本 —— 这一行是整个制式刷新的核心。
+            attachBadgeText(g, label);
+            // 系统重排这一格后可能改掉左边距，下一个周期校回来
+            final android.widget.TextView tv = BADGE_VIEWS.get(g);
+            if (tv != null) {
+                tv.postDelayed(new Runnable() {
+                    @Override public void run() { enforceBadgeMargin(g, tv); }
+                }, 120);
+            }
+        }
+    }
+
+    /** 强制把 5G 的左边距设回目标值（系统重排后可能被改掉） */
+    private static void enforceBadgeMargin(ViewGroup combo, android.widget.TextView tv) {
+        try {
+            ViewGroup.LayoutParams lp = tv.getLayoutParams();
+            if (!(lp instanceof android.widget.FrameLayout.LayoutParams)) return;
+            android.widget.FrameLayout.LayoutParams f =
+                    (android.widget.FrameLayout.LayoutParams) lp;
+            int want = Math.round(BADGE_LEFT_DP
+                    * tv.getResources().getDisplayMetrics().density);
+            if (f.leftMargin != want) {
+                f.leftMargin = want;
+                tv.setLayoutParams(f);
+            }
+        } catch (Throwable ignore) {}
+    }
+
+    /**
+     * 制式标取色。
+     *
+     * 不能只在创建时算一次：TextView 刚 new 出来时，同排 ImageView 的 tint 往往还是空的
+     * （系统要等下一次 onDarkChanged 才刷），算出来就退到写死的黑，深色背景上直接看不见。
+     * 这里返回 0 表示「还没拿到有效颜色」，由 ticker 过一会儿再试。
+     */
+    private static int resolveBadgeColor(ViewGroup combo) {
+        try {
+            for (int depth = 0; depth < 3; depth++) {
+                if (combo == null) break;
+                for (int i = 0; i < combo.getChildCount(); i++) {
+                    View child = combo.getChildAt(i);
+                    if (!(child instanceof ImageView)) continue;
+                    android.content.res.ColorStateList t = ((ImageView) child).getImageTintList();
+                    if (t != null) return t.getDefaultColor();
+                }
+                ViewParent up = combo.getParent();
+                combo = (up instanceof ViewGroup) ? (ViewGroup) up : null;
+            }
+        } catch (Throwable ignore) {}
+        // 兜底：信号图标自己的 tint（系统给整排设的就是它身上的值）
+        try {
+            ImageView sig = MAIN == null ? null : MAIN.get();
+            if (sig != null) {
+                android.content.res.ColorStateList t = sig.getImageTintList();
+                if (t != null) return t.getDefaultColor();
+            }
+        } catch (Throwable ignore) {}
+        return 0;
+    }
+
+    private static void syncBadgeColor(android.widget.TextView tv, ViewGroup combo) {
+        try {
+            int c = resolveBadgeColor(combo);
+            if (c == 0) return;               // 还没算出来，等下一轮
+            if (tv.getCurrentTextColor() != c) tv.setTextColor(c);
+        } catch (Throwable ignore) {}
+    }
+
+    /**
+     * 颜色跟随系统。状态栏换色（深/浅色切换、下拉面板遮罩）时系统只回调它自己的图标，
+     * 我们的 TextView 收不到，所以每秒对一次，取到了就停（不重建 drawable，几乎零开销）。
+     */
+    private static void startBadgeColorTicker() {
+        if (badgeColorTickerStarted) return;
+        badgeColorTickerStarted = true;
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        h.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    for (ViewGroup g : BADGE_COMBOS.keySet()) {
+                        if (g == null) continue;
+                        android.widget.TextView tv = BADGE_VIEWS.get(g);
+                        if (tv != null) syncBadgeColor(tv, g);
+                    }
+                } catch (Throwable ignore) {}
+                h.postDelayed(this, 1000);
+            }
+        }, 1000);
+    }
+
+    private static boolean badgeColorTickerStarted;
+
+    /**
+     * 立刻按「此刻」的系统色刷一遍所有制式标。
+     *
+     * 取色源优先级：时钟文字色（系统刚 setTextColor 的那个值最好使）
+     *   → 同排 ImageView 的 tint → 信号图标 tint。
+     * 时钟是状态栏唯一每帧都跟着主题走的文字，拿它当颜色基准最稳。
+     */
+    private static void syncAllBadgeColors(android.widget.TextView clock) {
+        if (BADGE_COMBOS.isEmpty()) return;
+        int base = 0;
+        try {
+            if (clock != null) base = clock.getCurrentTextColor();
+        } catch (Throwable ignore) {}
+        for (ViewGroup g : BADGE_COMBOS.keySet()) {
+            if (g == null) continue;
+            android.widget.TextView tv = BADGE_VIEWS.get(g);
+            if (tv == null) continue;
+            try {
+                int c = base != 0 ? base : resolveBadgeColor(g);
+                if (c == 0) continue;
+                if (tv.getCurrentTextColor() != c) tv.setTextColor(c);
+            } catch (Throwable ignore) {}
+        }
+    }
+
+    /**
+     * 等 mobile_combo 完成一次 layout 再建制式标。
+     *
+     * 系统界面刚重启时，stack() 是在容器还没 measure 完就被调起来的：
+     * 那会儿 combo 尺寸是 0，TextView 按 Gravity.TOP|START 落进去会堆在信号柱正上方，
+     * 等下次布局才被推到正确位置 —— 表现为「刚重启时 5G 压在柱子上，过一会儿才归位」。
+     * 量好了再建，第一帧就在正确位置。
+     */
+    private static void attachBadgeWhenMeasured(final ViewGroup combo,
+                                               final android.content.Context ctx) {
+        if (combo.getWidth() > 0 && combo.getHeight() > 0) {
+            attachBadgeText(combo, badgeLabel(ctx));
+            return;
+        }
+        combo.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override public void onLayoutChange(View v, int l, int t, int r, int b,
+                                                 int ol, int ot, int or, int ob) {
+                if (v.getWidth() <= 0 || v.getHeight() <= 0) return;
+                v.removeOnLayoutChangeListener(this);
+                try { attachBadgeText(combo, badgeLabel(ctx)); } catch (Throwable ignore) {}
+            }
+        });
+    }
+
+    private static void attachBadgeText(final ViewGroup combo, String text) {
+        try {
+            final android.widget.TextView tv;
+            android.widget.TextView old = BADGE_VIEWS.get(combo);
+            if (old != null && old.getParent() == combo) {
+                tv = old;
+                // 复用也要校一次边距：下拉控制中心重建后可能停在上一次的值
+                ViewGroup.LayoutParams lp0 = tv.getLayoutParams();
+                if (lp0 instanceof android.widget.FrameLayout.LayoutParams) {
+                    android.widget.FrameLayout.LayoutParams f0 =
+                            (android.widget.FrameLayout.LayoutParams) lp0;
+                    int want = Math.round(BADGE_LEFT_DP
+                            * tv.getResources().getDisplayMetrics().density);
+                    if (f0.leftMargin != want) {
+                        f0.leftMargin = want;
+                        tv.setLayoutParams(f0);
+                    }
+                }
+            } else {
+                tv = new android.widget.TextView(combo.getContext());
+                tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_DIP, 6.5f);
+                tv.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+                tv.setIncludeFontPadding(false);
+                tv.setId(View.generateViewId());
+                ViewGroup.LayoutParams lp;
+                if (combo instanceof android.widget.FrameLayout) {
+                    android.widget.FrameLayout.LayoutParams flp =
+                            new android.widget.FrameLayout.LayoutParams(
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                                    android.view.Gravity.TOP | android.view.Gravity.START);
+                    // 与箭头左缘对齐：箭头墨迹从 combo 左缘 x+7px 起步，
+                    // TextView 自带一点字形左留白，所以这里给 1.15dp 起步即可
+                    flp.leftMargin = Math.round(BADGE_LEFT_DP * combo.getResources()
+                            .getDisplayMetrics().density);
+                    // 顶部与闹钟齐平，不压信号柱
+                    flp.topMargin = Math.round(2 * combo.getResources()
+                            .getDisplayMetrics().density);
+                    lp = flp;
+                } else if (combo instanceof android.widget.LinearLayout) {
+                    lp = new android.widget.LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT);
+                    ((android.widget.LinearLayout.LayoutParams) lp).gravity = android.view.Gravity.TOP;
+                } else {
+                    lp = new ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT);
+                }
+                tv.setLayoutParams(lp);
+                // 让 TextView 不参与父容器测量 —— 它的宽度固定，不该影响 mobile_combo 的尺寸
+                combo.setClipChildren(false);
+                combo.setClipToPadding(false);
+                combo.addView(tv);
+                BADGE_VIEWS.put(combo, tv);
+            }
+            // 空串 = 该隐藏（WiFi 连着 / 制式未知）。不能直接 setText("") 完事，
+            // 要让 view 真正退出布局，否则左边缘会留一截空白把箭头挤走。
+            if (text.isEmpty()) {
+                if (tv.getVisibility() != View.GONE) tv.setVisibility(View.GONE);
+                tv.setText("");
+            } else {
+                if (tv.getVisibility() != View.VISIBLE) tv.setVisibility(View.VISIBLE);
+                // 布局可能已经变了（单/双卡切换、图标增减、WiFi 图标出现），
+            // 挂一次 layout 监听：几何一变就重新校准左边距。
+
+            if (!text.contentEquals(tv.getText())) tv.setText(text);
+            }
+            syncBadgeColor(tv, combo);
+        } catch (Throwable ignore) {}
+    }
+
 
     private static void applyWifiRule(ImageView signal) {
         try {
@@ -621,6 +872,92 @@ public final class Engine {
                 node = (View) p;
             }
         } catch (Throwable ignore) {}
+
+        // 网络指示器（上下行箭头）保留，只把它整体下移；5G 要占它上面那一条
+        try { dropDataInout(signal); } catch (Throwable ignore) {}
+    }
+
+    /**
+     * 把移动数据那一格的上传/下载箭头「放下来」—— 压到格子的底部。
+     *
+     * 只做 translationY 平移：箭头原样大小、原样宽度，整块往下挪。
+     * 不用 margin / LayoutParams —— 那会让箭头重新走 measure + scaleType，
+     * 素材被按新高度缩放，看起来就是「箭头变小了」。
+     *
+     * 只动「上面没有 WiFi 节点」的那一份（状态栏里 WiFi 与移动数据是两个独立分支），
+     * 否则会把 WiFi 自己的箭头一起推下去。
+     */
+    private static void dropDataInout(View from) {
+        try {
+            // 不再按 isWifiConnected 分流：切制式的瞬间 ConnectivityManager 可能短暂
+            // 报成「有 WiFi」，一走复位分支箭头就停在原位，叠在制式标上（看着像箭头消失）。
+            // 这里只按「这一支里有没有移动数据图标」判断，不动 WiFi 那一支。
+            View node = from;
+            for (int i = 0; i < 5; i++) {
+                ViewParent p = node.getParent();
+                if (!(p instanceof ViewGroup)) break;
+                node = (View) p;
+                ImageView hit = findByKeyInDataBranch(node);
+                if (hit != null) pushDown(hit);
+            }
+        } catch (Throwable ignore) {}
+    }
+
+    /**
+     * 在「不含 WiFi 节点」的子树里找 inout。
+     *
+     * 状态栏里 WiFi 与移动数据是两条独立分支，两边的 inout 都叫 data_inout / wifi_inout，
+     * 只按名字找会命中错的那一支，把 WiFi 自己的箭头也推下去。
+     */
+    private static ImageView findByKeyInDataBranch(View v) {
+        if (hasWifiBelow(v)) return null;
+        return findByKey(v, "inout", 0);
+    }
+
+    /**
+     * 箭头下移量（dp）。只平移，不改尺寸 ——
+     * 用 LayoutParams 会触发重新 measure + scaleType，箭头被按新高度缩放，看着就是「变小了」。
+     */
+    private static final float INOUT_DROP_DP = 7f;
+
+    /** 双卡布局下 mobile_signal 的高度基准（560dpi 实测 56px） */
+    private static final int DUAL_COLUMN_H = 56;
+
+    /**
+     * 信号柱高度 / 双卡基准柱高。双卡时柱子只占上半排，单卡是整格满高；
+     * 下移量按这个比例放大，单卡箭头才会落在同样的相对位置上。
+     */
+    private static float columnRatio() {
+        try {
+            ImageView sig = MAIN == null ? null : MAIN.get();
+            if (sig == null || sig.getHeight() == 0) return 1f;
+            float r = sig.getHeight() / (float) DUAL_COLUMN_H;
+            if (r < 0.9f) r = 0.9f;
+            if (r > 1.4f) r = 1.4f;
+            return r;
+        } catch (Throwable t) {
+            return 1f;
+        }
+    }
+
+    private static void pushDown(View v) {
+        try {
+            int px = Math.round(INOUT_DROP_DP * v.getResources().getDisplayMetrics().density
+                    * columnRatio());
+            v.setTranslationY(px);
+        } catch (Throwable ignore) {}
+    }
+
+    private static boolean hasWifiBelow(View v) {
+        String n = entryName(v);
+        if (n != null && n.contains("wifi")) return true;
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                if (hasWifiBelow(g.getChildAt(i))) return true;
+            }
+        }
+        return false;
     }
 
     private static void hideTypeAndInout(View v, int depth) {
@@ -631,9 +968,8 @@ public final class Engine {
         if (n != null && n.contains("mobile_type")) {
             hideHard(v);
         }
-        if (n != null && n.contains("inout") && !isWifiConnected(v.getContext())) {
-            hideHard(v);
-        }
+        // 网络指示器（上下行箭头）保留显示 —— C17 在移动数据下也显示它
+        // 先让它露出来看位置和观感，不合适再换素材
         if (v instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) v;
             for (int i = 0; i < g.getChildCount(); i++) hideTypeAndInout(g.getChildAt(i), depth + 1);
@@ -666,10 +1002,10 @@ public final class Engine {
      * 制式变化轮询。
      *
      * 切 4G/5G、开关 5G、换数据卡时，系统未必会重画信号图标，我们就没有机会重建制式标。
-     * 这里每 2.5 秒读一次当前制式，值一变就 refreshAll()，重启一次合成。
+     * 这是制式标的**唯一**刷新通道：每 2.5 秒读一次当前制式，值一变就直接改 TextView 文本。
+     * 不再调 refreshAll() —— 制式跟信号 drawable 已经没关系了，重建 drawable 只会白闪一下。
      * 只比一个字符串，开销可以忽略。
      */
-    private static String lastBadgeName;
     private static boolean badgeTickerStarted;
 
     private static void startBadgeTicker(final android.content.Context ctx) {
@@ -679,15 +1015,9 @@ public final class Engine {
         h.postDelayed(new Runnable() {
             @Override public void run() {
                 try {
-                    if (!isWifiConnected(ctx)) {
-                        String now = badgeNameFor(ctx);
-                        if (now != null && !now.equals(lastBadgeName)) {
-                            lastBadgeName = now;
-                            refreshAll();
-                        }
-                    } else {
-                        lastBadgeName = null;
-                    }
+                    // 无条件推一次。attachBadgeText 内部会比对文本，值没变时不会 setText，
+                    // 所以这里不缓存、不比对 —— 缓存一旦和屏幕脱节就再也推不动了。
+                    pushBadgeLabel(ctx);
                 } catch (Throwable ignore) {}
                 h.postDelayed(this, 2500);
             }
@@ -761,25 +1091,17 @@ public final class Engine {
     private static long lastBuildMs = 0;
 
     /**
-     * 让「网速 ↔ 信号」的间距等于「信号 ↔ 电池」的间距：
-     * 先量出两个间距，再把网速整体平移差值。
-     */
-    /**
      * WiFi 的槽位复用：
      *   有 WiFi → 让系统画 WiFi（外观已换成 C17 素材）
      *   没 WiFi → 在同一个 ImageView 上画 5G，并把它所在的 combo 打开
      * 不新增任何 view，只改已有 view 的 drawable / 可见性，所以不会打乱布局。
      */
-    /** 从主信号 view 往上找到状态栏容器，再递归找 wifi 图标 */
 
     /**
      * 网速那一格「视觉高度」：数字行 + 单位行的实际墨迹跨度（不是 View 高度，
      * View 高度含 padding，会比看到的高一倍多）。信号图标按这个值绘制，
      * 才能和网速逐像素齐平；分辨率/显示大小一变，这里跟着变，比例不会跑。
      */
-    /** 状态栏网速那块里的 TextView（母容器 id = network_speed） */
-    /** 状态栏在屏幕最上面，控制中心里若也有网速副本，取 y 最小的那个 */
-    /** 这个 TextView 是不是站在 network_speed 那格里 */
     private static ImageView findByKey(View v, String key, int depth) {
         if (depth > 14 || v == null) return null;
         if (v instanceof ImageView) {
@@ -796,11 +1118,6 @@ public final class Engine {
         return null;
     }
 
-    /** 把网速文字往右推，使「网速↔信号」间距等于 12dp */
-    /**
-     * 网速文字宽度会随数字变化（1.00 / 34.0 / 367），导致整组图标左右跳。
-     * 把它的宽度锁定成第一次测到的值并右对齐，位置就固定了。
-     */
     /**
      * 逐帧盯着网速文字的颜色。
      *
@@ -810,9 +1127,7 @@ public final class Engine {
      * 和上次不同就重绘 —— 最多晚一帧（16ms），与系统换色同步。
      */
 
-    /** 系统下发的状态栏明暗强度（0=深色图标，1=浅色图标） */
 
-        /** 原厂的状态栏明暗强度：只作为「宿主没有 tint」时的兜底 */
     private static volatile float FALLBACK_DARK = -1f;
 
     private static void applyFallbackDark(float d) {
@@ -849,10 +1164,6 @@ public final class Engine {
      */
 
     /**
-     * 同一排电池图标当前的 tint —— 这就是系统给整排状态栏图标上的颜色。
-     * 逐帧读它比等 setIconColor 回调可靠：展开控制中心时系统未必会重新下发颜色，
-     * 但电池图标本身一定会跟着背景翻色。
-     */
         /** 系统每次重新布局都会把 translation 冲掉，这里挂个监听重压一次 */
     private static void attachLayoutWatcher(final View main) {
         try {
@@ -1107,10 +1418,6 @@ public final class Engine {
     /**
      * 收起副卡那一路容器：尺寸压 0 + INVISIBLE，但**不能 GONE**。
      *
-     * GONE 之后有些路径下系统会把它从树里摘掉（下拉控制中心重建状态栏时尤其明显），
-     * 下一次 stack() 就只找到一个 signal，判定成单卡，于是画成满高四格 ——
-     * 5G 徽标和副卡小点都没了。留成 INVISIBLE，节点仍在树里，双卡判定才稳定。
-     */
     /** 被我们收起来的节点（副卡的 combo / mobile_group）。系统每次刷图标都会改可见性，
      *  所以要在 hook 里持续把它们按回去，光收一次是不够的。 */
     private static final java.util.WeakHashMap<View, Boolean> HIDDEN = new java.util.WeakHashMap<>();
@@ -1271,13 +1578,31 @@ public final class Engine {
                     ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
             cm.registerNetworkCallback(new android.net.NetworkRequest.Builder().build(),
                     new android.net.ConnectivityManager.NetworkCallback() {
-                        @Override public void onAvailable(android.net.Network n) { refreshAll(); }
-                        @Override public void onLost(android.net.Network n) { refreshAll(); }
+                        @Override public void onAvailable(android.net.Network n) { onNetChanged(ctx); }
+                        @Override public void onLost(android.net.Network n) { onNetChanged(ctx); }
                         @Override public void onCapabilitiesChanged(android.net.Network n,
-                                android.net.NetworkCapabilities c) { refreshAll(); }
+                                android.net.NetworkCapabilities c) { onNetChanged(ctx); }
                     });
         } catch (Throwable t) {
         }
+    }
+
+    /**
+     * 网络能力变化（含 WiFi 上下线）的统一入口。
+     *
+     * 制式标要在这里立刻重算：WiFi 连上就该马上收起 5G，断开就该马上显示，
+     * 靠 2.5 秒 ticker 会明显慢一拍，这里直接推一次。
+     */
+    private static void onNetChanged(android.content.Context ctx) {
+        // 只重绘，不重建：WiFi 上下线时系统马上会重draw 自己的图标，
+        // 我们在这里再 refreshAll() 等于和系统抢同一帧，WiFi 图标会被压到后面才出现。
+        try {
+            for (ImageView v : SITES.keySet()) {
+                if (v == null) continue;
+                Drawable d = v.getDrawable();
+                if (d != null) d.invalidateSelf();
+            }
+        } catch (Throwable ignore) {}
     }
 
     private static void refreshAll() {

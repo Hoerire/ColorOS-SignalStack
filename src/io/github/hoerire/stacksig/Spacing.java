@@ -72,13 +72,6 @@ final class Spacing {
         }
     }
 
-    /**
-     * 把所有可见图标的左右 padding 统一成同一个值，让相邻图标之间的缝隙恒定。
-     *
-     * 原厂各格的 padding 是各自不同的（网速 7px、信号 0、WiFi 0 …），所以图标多一个少一个
-     * 缝隙就变样。这里统一成 GAP_INSET_PX：左右各一份，相邻两格合计就是一条恒定缝。
-     * 只改 padding，不动任何 child 的顺序/尺寸，updateStates 照常算。
-     */
     /** 模块编译期拿不到 SystemUI 的类，只能按类名判断（StatIconView / *StatusBarIconView / *combo） */
     private static boolean isStatusIcon(View v) {
         // 先按 id 名判断（mobile_combo / wifi_combo / network_speed 都在 id 上）

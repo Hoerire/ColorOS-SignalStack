@@ -52,11 +52,145 @@ public final class Engine {
         ok += hookDarkChanged(m, cl);
         ok += hookVisibility(m);
         // 颜色交给系统（见 VStack 注释），这里不再干预
-        ok += hookNetSpeedInterval(m);
+        ok += hookSpeedValue(m, cl);
         ok += hookSpeedAlign(m, cl);
         ok += hookIconOrder(m, cl);
         ok += hookIconGap(m, cl);
         return ok;
+    }
+
+
+    // ==================== 网速：自己算，接管数值 ====================
+
+    /**
+     * 原厂网速不准的原因：我们之前只把「重发消息的时间点」从 4 秒压到 1 秒，
+     * 但没改差分窗口 —— 分母忽大忽小，瞬时抖动被放大，实测 1.2 KB/s 会显示成 7.00。
+     *
+     * 现在的做法：不再碰它的定时器，改为**直接替换数值来源**。
+     * hook `NetworkSpeedIconState.getSpeedText()`（原厂返回 字节/秒），
+     * 返回我们按真实时间差算出来的速率。单位换算、格式化、显示/隐藏全交给原厂。
+     */
+    private static volatile long OUR_SPEED_BPS = 0;
+    private static long lastRx, lastTx, lastNetMs;
+    private static java.util.HashSet<String> netIfaces;
+    private static boolean speedTickerStarted;
+
+    private static void startSpeedTicker(final android.content.Context ctx) {
+        if (speedTickerStarted) return;
+        speedTickerStarted = true;
+        netIfaces = activeIfaces();
+        sampleSpeed(true);                       // 建立基线
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        h.postDelayed(new Runnable() {
+            @Override public void run() {
+                try { sampleSpeed(false); } catch (Throwable ignore) {}
+                h.postDelayed(this, 1000);
+            }
+        }, 1000);
+    }
+
+    /**
+     * 要统计的接口：只算真正上网的那几张。
+     *
+     * 不能靠 /proc/net/route —— 里面只列了子网路由，默认路由那行不一定在，
+     * 而且虚拟接口（dummy/gre/ifb/sit…）一大堆，全算进去数值会虚高。
+     * 这里按名字白名单，并跳过隧道外的虚拟设备。
+     */
+    private static java.util.HashSet<String> activeIfaces() {
+        java.util.HashSet<String> set = new java.util.HashSet<>();
+        try {
+            String[] names = new java.io.File("/sys/class/net").list();
+            if (names == null) return set;
+            for (String n : names) {
+                if (n.equals("lo")) continue;
+                if (n.startsWith("dummy") || n.startsWith("ifb") || n.startsWith("gre")
+                        || n.startsWith("ip6") || n.startsWith("ip_vti") || n.startsWith("sit")
+                        || n.startsWith("erspan") || n.startsWith("tunl") || n.startsWith("p2p")
+                        || n.startsWith("wifi-aware") || n.startsWith("ovnet")
+                        || n.startsWith("r_rmnet")) continue;
+                if (n.startsWith("wlan") || n.startsWith("rmnet_data")
+                        || n.startsWith("eth") || n.equals("tun0")) {
+                    set.add(n);
+                }
+            }
+        } catch (Throwable ignore) {}
+        return set;
+    }
+
+    /**
+     * 读累计收发字节。
+     *
+     * 用 android.net.TrafficStats —— 它是公开 API，直接给「全部网络接口」的累计字节，
+     * 不需要读 /proc 或 /sys（SystemUI 的 SELinux 域读不到 /sys/class/net，会返回空）。
+     * UNSUPPORTED 时（部分设备返回 -1）退回 /proc/net/dev 全量相加。
+     */
+    private static long[] readBytes() {
+        try {
+            long rx = android.net.TrafficStats.getTotalRxBytes();
+            long tx = android.net.TrafficStats.getTotalTxBytes();
+            if (rx > 0 || tx > 0) return new long[]{rx, tx};
+        } catch (Throwable ignore) {}
+        long rx = 0, tx = 0;
+        try {
+            java.io.BufferedReader br = new java.io.BufferedReader(
+                    new java.io.FileReader("/proc/net/dev"));
+            String line;
+            br.readLine(); br.readLine();
+            while ((line = br.readLine()) != null) {
+                int c = line.indexOf(':');
+                if (c < 0) continue;
+                String name = line.substring(0, c).trim();
+                if (name.equals("lo")) continue;     // 只排除回环
+                String[] f = line.substring(c + 1).trim().split("\\s+");
+                if (f.length < 9) continue;
+                rx += Long.parseLong(f[0]);
+                tx += Long.parseLong(f[8]);
+            }
+            br.close();
+        } catch (Throwable ignore) {}
+        return new long[]{rx, tx};
+    }
+
+    private static void sampleSpeed(boolean baseline) {
+        long now = android.os.SystemClock.uptimeMillis();
+        long[] b = readBytes();
+        if (baseline || lastNetMs == 0) {
+            lastRx = b[0]; lastTx = b[1]; lastNetMs = now;
+            OUR_SPEED_BPS = 0;
+            return;
+        }
+        long dt = now - lastNetMs;
+        if (dt < 200) return;                    // 太短的分母不可信
+        long d = (b[0] - lastRx) + (b[1] - lastTx);
+        if (d < 0) d = 0;                        // 计数器回绕
+        OUR_SPEED_BPS = d * 1000L / dt;          // B/s
+        lastRx = b[0]; lastTx = b[1]; lastNetMs = now;
+    }
+
+    private static int hookSpeedValue(XposedModule m, ClassLoader cl) {
+        try {
+            Class<?> c = Class.forName(
+                    "com.oplus.systemui.statusbar.phone.netspeed.NetworkSpeedIconState",
+                    false, cl);
+            Method md = c.getDeclaredMethod("getSpeedText");
+            m.hook(md).intercept(new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
+                    Object r = ch.proceed();
+                    try {
+                        long orig = (r instanceof Long) ? (Long) r : 0L;
+                        // 原厂要隐藏时给负值，这种不要覆盖
+                        if (orig < 0) return r;
+                        return OUR_SPEED_BPS;
+                    } catch (Throwable ignore) {}
+                    return r;
+                }
+            });
+            return 1;
+        } catch (Throwable t) {
+            try { MODULE.log(android.util.Log.WARN, "StackSig", "speedValue hook failed: " + t); }
+            catch (Throwable ignore) {}
+            return 0;
+        }
     }
 
     // ==================== 图标间距 ====================
@@ -657,6 +791,7 @@ public final class Engine {
             // 颜色由系统 tint 驱动，不需要逐帧比对
             startColorTicker(main);
             startBadgeTicker(main.getContext());
+            startSpeedTicker(main.getContext());
             main.setImageDrawable(composed);
             if (secondRoot != null) collapse(secondRoot);
             // 兜底：这个容器里凡是还带信号的兄弟节点（副卡另一份、制式图那一份）全收掉，
@@ -819,6 +954,17 @@ public final class Engine {
     private static void hideTypeAndInout(View v, int depth) {
         if (depth > 6 || v == null) return;
         String n = v.getId() != View.NO_ID ? entryName(v) : null;
+        if (n != null && (n.contains("wifi") || n.contains("inout"))) {
+            try {
+                MODULE.log(android.util.Log.WARN, "StackSig", "inout node: id=" + n
+                        + " cls=" + v.getClass().getSimpleName()
+                        + " w=" + v.getWidth() + " h=" + v.getHeight()
+                        + " vis=" + v.getVisibility()
+                        + " parent=" + (v.getParent() instanceof View
+                            ? entryName((View) v.getParent()) : "?")
+                        + " wifi=" + isWifiConnected(v.getContext()));
+            } catch (Throwable ignore) {}
+        }
         // 收掉制式小图（制式标已画进信号图标）。
         // 上传/下载箭头只在 WiFi 下保留：移动数据下显示会和制式标挤在一起，显得割裂。
         if (n != null && n.contains("mobile_type")) {

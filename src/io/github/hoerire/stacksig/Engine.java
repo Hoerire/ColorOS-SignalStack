@@ -271,6 +271,8 @@ public final class Engine {
                 String n = entryName(iv);
                 if (n == null) return r;
 
+                // 下拉栏里那份完全交还系统
+                if (isInShade(iv)) return r;
                 if (n.contains(KEY)) {
                     if ("setImageResource".equals(c.getExecutable().getName())) {
                         Object arg = c.getArg(0);
@@ -343,6 +345,10 @@ public final class Engine {
         
     /** 主入口：找容器 → 取主/副卡 → 合成 */
     private static void stack(ImageView iv) {
+        // 下拉通知栏里那份图标保持原厂行为，模块一概不碰。
+        // 判断方式是看它是否挂在 NotificationShadeWindowView 这棵子树下 ——
+        // 那是下拉面板的根视图，状态栏本身不在里面。
+        if (isInShade(iv)) return;
         ViewGroup container = null;
         View node = iv;
         for (int depth = 0; depth < 8; depth++) {
@@ -946,6 +952,30 @@ public final class Engine {
                     * columnRatio());
             v.setTranslationY(px);
         } catch (Throwable ignore) {}
+    }
+
+    /**
+     * 这个 view 是不是在下拉通知栏里。
+     *
+     * 下拉面板有自己的根视图 NotificationShadeWindowView，状态栏那一份在它的外部，
+     * 所以按祖先链上有无这个类名就能区分。宁可在拿不到类名时返回 false（照常处理
+     * 状态栏那一份），也不要误判导致状态栏失去效果。
+     */
+    private static boolean isInShade(View v) {
+        try {
+            View cur = v;
+            for (int i = 0; i < 24 && cur != null; i++) {
+                String cn = cur.getClass().getName();
+                if (cn.contains("NotificationShadeWindowView")
+                        || cn.contains("NotificationPanelView")
+                        || cn.contains("NotificationsQuickSettingsContainer")) {
+                    return true;
+                }
+                ViewParent p = cur.getParent();
+                cur = (p instanceof View) ? (View) p : null;
+            }
+        } catch (Throwable ignore) {}
+        return false;
     }
 
     private static boolean hasWifiBelow(View v) {

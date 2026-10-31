@@ -3,5 +3,5 @@ targetApiVersion=102
 staticScope=true
 exceptionMode=protective
 name=ColorOS 堆叠信号
-version=v1.7
-versionCode=43
+version=v1.8
+versionCode=44

@@ -62,7 +62,8 @@ public final class Engine {
     // ==================== 图标间距（信号 ↔ WiFi 收紧） ====================
 
     /** 信号那格右侧收掉的宽度（px）。实测 1px 收 = 2px 缝，所以 -4 正好把 23px 缝收到 15px。 */
-    private static final int GAP_INSET_PX = 2;
+    // 所有普通格的左右 padding 基准。整簇偏宽就往小调，偏窄就往大调 —— 只改这一个数。
+    private static final int GAP_INSET_PX = 0;
     private static int SLOTS_LOGGED = 0;
     private static long LAST_GAP_LOG = 0;
 
@@ -73,13 +74,15 @@ public final class Engine {
     // 不再用负 padding 硬拽（负值会同时影响本格右侧和下一格左侧，一改就乱）。
     // 在上一版基础上整体再收 1/3：各 padEnd 都给一个小负值，负数把「本格→右侧」的缝压窄。
     // 只用 padding，不动任何 View 的宽高，图标本身大小不变。
+    private static final int PAD_BT_START = 2;
+    private static final int PAD_BT_END = 6;    // 右边挨着 5G 徽标，要比普通格宽
     private static final int PAD_NFC_END = -5;
-    private static final int PAD_CLOCK_END = 3;   // 正值才把闹钟往左推；负值会让它更贴信号
+    private static final int PAD_CLOCK_END = 2;   // 中性值；右邻是哪个图标不固定，不能按单图标调
     private static final int PAD_ZEN_START = 0;   // 月亮 ↔ 信号（改这个只会动左侧，右侧是素材留白）
     private static final int PAD_ZEN_END = -4;
     private static final int PAD_SPEED_START = 0;
     private static final int PAD_SPEED_END = -3;   // 网速 → NFC
-    private static final int PAD_SIGNAL_START = 0;  // 不要动：调它会把信号整格推走，电池就远离了
+    private static final int PAD_SIGNAL_START = 0;  // 不要动：会推走右侧一切
     private static final int PAD_SIGNAL_END = -4;  // 信号 → WiFi
     private static final int PAD_WIFI_END = -4;    // WiFi → 电池
 
@@ -211,27 +214,238 @@ public final class Engine {
     }
 
     /** 各格左右 padding 的表。键是 View 在 SIC 里的 id；id 为 null 的按位置从左到右取 null1/null2/null3。 */
-    private static int[] gapFor(View v, int nullRank) {
-        String id = entryName(v);
-        if (id == null) {
-            // 无名 StatIconView：优先用 slot 名定位（图标显隐不影响），拿不到才退回可见序号
-            String slot = slotOf(v);
-            if (slot != null) {
-                if (slot.contains("nfc"))   return new int[]{GAP_INSET_PX, PAD_NFC_END};
-                if (slot.contains("alarm")) return new int[]{GAP_INSET_PX, PAD_CLOCK_END};
-                if (slot.contains("zen"))   return new int[]{PAD_ZEN_START, PAD_ZEN_END};
+
+    // ==================== 间距自适应 ====================
+
+    /** 目标：相邻图标的「墨迹」之间留这么多像素（会被 MIN/MAX 夹住） */
+    private static final int GAP_TARGET = 16;
+    private static final int GAP_MIN = 10;      // 间距下限：再挤就重叠了
+    private static final int GAP_MAX = 24;      // 间距上限：再大就显得稀疏
+
+    /**
+     * 每格的墨迹左右内缩量（px），由实测得出后缓存。
+     *
+     * 做法：把 View 画到一张临时 Bitmap 上，扫描非透明像素的左右边界，
+     * 得到「View 左缘 → 墨迹左缘」和「墨迹右缘 → View 右缘」两段留白。
+     * 素材留白是固定的，所以只需算一次（View 宽变了才重算）。
+     */
+    private static String lastBalanceSig = "";
+    private static final java.util.WeakHashMap<View, int[]> INK_INSET = new java.util.WeakHashMap<>();
+    private static final java.util.WeakHashMap<View, Integer> INK_W = new java.util.WeakHashMap<>();
+
+    private static int[] inkInset(View v) {
+        int w = v.getWidth(), h = v.getHeight();
+        if (w <= 0 || h <= 0) return null;
+        Integer cachedW = INK_W.get(v);
+        if (cachedW != null && cachedW == w) {
+            int[] c = INK_INSET.get(v);
+            if (c != null) return c;
+        }
+        try {
+            android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                    w, h, android.graphics.Bitmap.Config.ALPHA_8);
+            android.graphics.Canvas cv = new android.graphics.Canvas(bmp);
+            v.draw(cv);
+            int left = -1, right = -1;
+            int[] row = new int[w];
+            for (int y = 0; y < h; y++) {
+                bmp.getPixels(row, 0, w, 0, y, w, 1);
+                for (int x = 0; x < w; x++) {
+                    if ((row[x] & 0xFF) != 0) {
+                        if (left < 0 || x < left) left = x;
+                        if (x > right) right = x;
+                    }
+                }
             }
-            switch (nullRank) {
-                case 1:  return new int[]{GAP_INSET_PX, PAD_NFC_END};
-                case 2:  return new int[]{GAP_INSET_PX, PAD_CLOCK_END};
-                case 3:  return new int[]{PAD_ZEN_START, PAD_ZEN_END};
-                default: return new int[]{GAP_INSET_PX, GAP_INSET_PX};
+            bmp.recycle();
+            if (left < 0) return null;                 // 整格全透明，不参与计算
+            int[] r = new int[]{left, w - 1 - right};
+            INK_INSET.put(v, r);
+            INK_W.put(v, w);
+            return r;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 按实测墨迹把间距拉齐。
+     *
+     * 对每对相邻图标：当前墨迹缝 = 右格墨迹左缘 - 左格墨迹右缘。
+     * 与目标值的差，一半由左格 paddingEnd 吸收、一半由右格 paddingStart 吸收。
+     * 差值先夹到 [GAP_MIN, GAP_MAX] 范围内允许的调整量，避免把某一格压扁。
+     */
+    /**
+     * 把每格的 View 宽度固定成「图标真实宽度 + 固定间距」。
+     *
+     * StatusIconContainer.updateStates() 从右往左累加 width + padStart + padEnd
+     * 得到每格的 translationX —— 只要 width 恒定，缝就恒定，与图标组合无关。
+     * 图标本身大小不变：只是把 View 里那圈多余的透明留白裁掉。
+     */
+    private static final int CELL_GAP_PX = 14;
+    /** 信号格左侧给制式标预留的宽度（px）。WiFi 那格减半抵消，电池位置基本不变。 */
+    private static final int BADGE_LEFT_RESERVE_PX = 12;
+
+
+    /**
+     * 实测一格里「看得见」的宽度：把 drawable 单独画到 Bitmap 上，扫非透明像素。
+     * 只画 drawable、不画 View，就绕开了 padding 和背景干扰。
+     */
+    private static int measureInkWidth(View v, ImageView iv) {
+        try {
+            android.graphics.drawable.Drawable d = iv.getDrawable();
+            if (d == null) return 0;
+            int w = iv.getWidth(), h = iv.getHeight();
+            if (w <= 0 || h <= 0) {
+                w = d.getIntrinsicWidth();
+                h = d.getIntrinsicHeight();
+            }
+            if (w <= 0 || h <= 0) return 0;
+            android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(
+                    w, h, android.graphics.Bitmap.Config.ALPHA_8);
+            android.graphics.Canvas cv = new android.graphics.Canvas(bmp);
+            d.setBounds(0, 0, w, h);
+            d.draw(cv);
+            int left = -1, right = -1;
+            int[] row = new int[w];
+            for (int y = 0; y < h; y++) {
+                bmp.getPixels(row, 0, w, 0, y, w, 1);
+                for (int x = 0; x < w; x++) {
+                    if ((row[x] & 0xFF) != 0) {
+                        if (left < 0) left = x;
+                        right = x;
+                    }
+                }
+            }
+            bmp.recycle();
+            return left < 0 ? 0 : (right - left + 1);
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    private static void fixCellWidths(ViewGroup g) {
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View v = g.getChildAt(i);
+            if (v.getVisibility() != View.VISIBLE || !isStatusIcon(v)) continue;
+            if (!(v instanceof ImageView)) continue;
+            android.graphics.drawable.Drawable d = ((ImageView) v).getDrawable();
+            if (d == null) continue;
+            // 用实测墨迹宽度，而不是 intrinsic——后者是素材原尺寸，
+            // 与屏幕上实际画出来的大小不一致（StatIconView 会按系统图标尺寸缩放）。
+            int iw = measureInkWidth(v, (ImageView) v);
+            if (iw <= 0) iw = d.getIntrinsicWidth();
+            if (iw <= 0) continue;
+            // 网速那格是 ViewGroup，墨迹只占左半边，右侧空白会把缝撑大。
+            // 改用内部文字的实际宽度。
+            String id0 = entryName(v);
+            if (id0 != null && id0.toLowerCase().contains("network_speed")) {
+                android.widget.TextView tv = findSpeedText(v, 0);
+                if (tv != null && tv.getPaint() != null) {
+                    CharSequence cs = tv.getText();
+                    if (cs != null) {
+                        int tw = (int) Math.ceil(tv.getPaint().measureText(cs.toString()));
+                        if (tw > 0) iw = tw;
+                    }
+                }
+            }
+            int want = iw + CELL_GAP_PX;
+            // 不再给「左邻」加宽：加宽只会把它推左，蓝牙与徽标的距离并没有变。
+            // 徽标贴蓝牙的问题改在 VStack 里，把徽标画在信号格内部靠右一点。
+            // 信号格左边要塞下制式标，多给一点宽度；WiFi 那格相应收窄，
+            // 一加一减相互抵消，电池位置基本不动。
+            String idn = entryName(v);
+            if (idn != null) {
+                String kn = idn.toLowerCase();
+                // 给信号格加 padding 只会把整簇推走，徽标与蓝牙的距离不变 —— 这条路无效，已放弃。
+                // 「蓝牙↔5G 偏窄」的正确解法在 VStack：把徽标往信号柱那边靠（BADGE_X 已调）。
+            }
+            ViewGroup.LayoutParams lp = v.getLayoutParams();
+            if (lp != null && lp.width != want) {
+                lp.width = want;
+                v.setLayoutParams(lp);
+            }
+            if (v.getPaddingLeft() != 0 || v.getPaddingRight() != 0) {
+                v.setPadding(0, v.getPaddingTop(), 0, v.getPaddingBottom());
             }
         }
-        String k = id.toLowerCase();
-        if (k.contains("network_speed")) return new int[]{PAD_SPEED_START, PAD_SPEED_END};
-        if (k.contains("wifi")) return new int[]{GAP_INSET_PX, PAD_WIFI_END};
-        if (k.contains("combo")) return new int[]{PAD_SIGNAL_START, PAD_SIGNAL_END};
+    }
+
+    private static void balance(ViewGroup g) {
+        java.util.ArrayList<View> list = new java.util.ArrayList<>();
+        StringBuilder sigb = new StringBuilder();
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View v = g.getChildAt(i);
+            if (v.getVisibility() == View.VISIBLE && isStatusIcon(v)) {
+                list.add(v);
+                sigb.append(entryName(v)).append(slotOf(v)).append(v.getWidth()).append('|');
+            }
+        }
+        // 只在「可见图标集合 + 各自宽度」变化时重算一次。
+        // 否则每次 updateStates 都基于上一帧已经调过的结果再算，越调越紧，最后压到下限。
+        String sig = sigb.toString();
+        if (sig.equals(lastBalanceSig)) return;
+        lastBalanceSig = sig;
+        for (int i = 0; i < list.size(); i++) {
+            View v = list.get(i);
+            int wantStart = 0, wantEnd = 0;
+            // 左邻的右缘 → 本格左缘
+            if (i > 0) {
+                View p = list.get(i - 1);
+                wantStart = clampAdjust(v.getLeft() - (p.getLeft() + p.getWidth())) / 2;
+            }
+            // 本格右缘 → 右邻左缘
+            if (i < list.size() - 1) {
+                View n = list.get(i + 1);
+                wantEnd = clampAdjust(n.getLeft() - (v.getLeft() + v.getWidth())) / 2;
+            }
+            // 直接设定目标值（基于基准值 + 本次修正），而不是在当前值上累加。
+            // 累加会形成正反馈：改完布局变了，下一帧再测又偏，越调越紧。
+            int ps = clampPad(GAP_INSET_PX + wantStart);
+            int pe = clampPad(GAP_INSET_PX + wantEnd);
+            if (v.getPaddingLeft() != ps || v.getPaddingRight() != pe) {
+                v.setPadding(ps, v.getPaddingTop(), pe, v.getPaddingBottom());
+            }
+        }
+    }
+
+    /** padding 本身也夹一个范围，负太多会把格子压塌 */
+    private static int clampPad(int p) {
+        if (p < -10) return -10;
+        if (p > 16) return 16;
+        return p;
+    }
+
+    /** 缝比目标大就要收，小就要放；结果夹在允许范围内 */
+    private static int clampAdjust(int gap) {
+        int d = gap - GAP_TARGET;          // >0: 太宽，要收
+        int maxIn = gap - GAP_MIN;         // 最多能收这么多
+        int maxOut = GAP_MAX - gap;        // 最多能放这么多
+        if (d > 0) return Math.min(d, Math.max(0, maxIn));
+        return -Math.min(-d, Math.max(0, maxOut));
+    }
+
+    /**
+     * 每一格的左右 padding —— 全部相同。
+     *
+     * 这里刻意**不做任何按图标身份的区分**。
+     *
+     * 试过的错：给 nfc / alarm / zen / bluetooth 各自配一组 padding，
+     * 结果只要左右增减一个图标（开蓝牙、开免打扰、开静音），缝就重新乱掉 ——
+     * 因为「某格与它右邻的缝」取决于右邻是谁，而右邻随时会变。
+     * 按身份调参这条路，图标组合一多就必然崩。
+     *
+     * 现在统一成一个值：任意两格之间的缝恒定，图标增删只改变总宽，不改变美观度。
+     * 要整体收紧或放宽，只改 GAP_INSET_PX 这一个数。
+     */
+    private static int[] gapFor(View v, int nullRank) {
+        // 蓝牙右边紧挨信号格左上角的制式标，需要比其他格多留一点
+        if (v.getId() == View.NO_ID) {
+            String slot = slotOf(v);
+            if (slot != null && slot.contains("bluetooth")) {
+                return new int[]{GAP_INSET_PX, GAP_INSET_PX + 1};
+            }
+        }
         return new int[]{GAP_INSET_PX, GAP_INSET_PX};
     }
 

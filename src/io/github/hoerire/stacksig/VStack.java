@@ -23,8 +23,8 @@ public final class VStack extends Drawable {
     // 制式标：高度统一，宽度按素材自身宽高比（5GA 三个字符自然更宽，但不许压扁）
     private static final float BADGE_H = 0.30f;
     private static final float BADGE_RATIO = 1.38f; // 素材拿不到 intrinsic 时的兜底比例
-    private static final float BADGE_Y = 0.06f;
-    private static final float BADGE_X = -0.02f;  // 信号左上角偏左；再负会被 View 边界裁掉
+    private static final float BADGE_Y = 0.08f;
+    private static final float BADGE_X = 0.02f;   // 信号左上角（与早期一致）
 
     private final Drawable primary;
     private final Drawable secondary;

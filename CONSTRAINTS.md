@@ -117,13 +117,29 @@ su -c "grep 'StackSig' $L" | tail -20
 
 ## 七、当前状态
 
-**已安装**：带 `hookIconOrder` 的版本（构建于 `out-order/`，08:04:05 安装）。
-效果：状态栏顺序已是「信号 → WiFi → 电池」，与 ColorOS 17 一致，SystemUI 稳定。
+**已发布**：v1.6 / versionCode 40。
+内容 = v1.5 + `Engine.hookIconOrder()` / `reorder()`（图标顺序对齐 ColorOS 17）。
 
-**源码**：`main` 分支待提交本次改动（`Engine.hookIconOrder` + `reorder`，共 52 行）。
+**已安装**：v1.6，状态栏顺序为「网速 → 信号 → WiFi → 电池」，SystemUI 稳定。
 
-**回滚备份**：`/storage/emulated/0/DeepSeek/out-stable/signed.apk`（无排序改动）。
+**版本号必须两处同步改**：
+- `meta/META-INF/xposed/module.prop` → `version` / `versionCode`（LSPosed 读这个）
+- `meta/AndroidManifest.xml` → `android:versionName` / `android:versionCode`（pm 读这个）
 
-**未发布**：新版本尚未推送仓库 release，versionCode 仍为 39 / v1.5。
+只改一处会导致 `pm install -r` 认为是同版本而不更新，`dumpsys` 显示的版本号也对不上。
 
-**下一步**：无待办。大号制式标方向已否决（见第二节「信号 drawable 的绘制边界」）。
+**产物大小参考**（正常范围）：
+
+| 版本 | 文件 | 内容 | dex |
+|---|---|---|---|
+| v1.5 | 68007 | 58664 | 34100 |
+| v1.6 | 72103 | 59774 | 35212 |
+
+差距全在 dex（新增排序逻辑），文件尺寸跳变来自 `zipalign -p 4` 的 4096 页对齐。
+
+**已否决的方向**（不要再试）：
+- 大号制式标放信号右侧 —— 67px View 边界，画出去被裁
+- 加宽信号 `intrinsicWidth` —— 被电池顶掉
+- 制式独立放到信号与电池之间 —— 容器没有多余空间
+- 借 `oplus_satellite` slot —— 系统不为闲置 slot 建 view（实测容器恒为 21 个 child）
+- 撑开 WiFi 槽 —— 它在最左端，会推挤网速/信号并被裁剪

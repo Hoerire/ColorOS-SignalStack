@@ -173,6 +173,16 @@ v1.8 定型内容：
 只遍历父类拿不到，必须再遍历接口。现在 `slotOf()` 会返回
 `nfc` / `alarm_clock` / `mobile` / `network_speed` / `satellite` 等真实名字。
 
+### 制式标不跟着变（5G 显示成 4G）的两个坑
+
+1. **取错 TelephonyManager**：双卡机器上 `getDataNetworkType()` 用的是默认 subId，
+   未必是真正跑数据的那张卡。要先用 `SubscriptionManager.getDefaultDataSubscriptionId()`
+   拿 subId，再 `createForSubscriptionId(subId)`。见 `dataTelephonyManager()`。
+2. **重建条件里没有制式**：`stack()` 用 `sig` 做去重，原来是
+   `等级/副卡/wifi`，切 4G→5G 时等级没变 → `sig` 相同 → 直接 return，制式标永远停在旧值。
+   现在 `sig` 里带上 `badgeNameFor(ctx)`，并且加了 `startBadgeTicker()` 每 2.5 秒比对一次，
+   因为系统切制式时未必会重画信号图标。
+
 **padding 符号的方向**（实测，别再反）：
 - 给某格 `paddingEnd` **正值** → 它自己往**左**移（因为 updateStates 从右往左累加，宽度变大把它推左）；
 - **负值** → 往**右**挤，会更贴近右边的邻居。

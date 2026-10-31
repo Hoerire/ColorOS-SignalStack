@@ -701,7 +701,14 @@ public final class Engine {
         } else {
             ls = -1;
         }
-        String sig = lp + "/" + ls + "/" + (wifi ? "w" : "m");
+        // 重建条件必须带上「网络制式」：只比信号等级的话，切 4G/5G 时等级没变，
+        // sig 相同就直接 return，制式标会永远停在旧值（下拉栏走系统 DisplayInfo 所以是对的）。
+        String badgeKey = "";
+        {
+            android.content.Context bc = main.getContext();
+            badgeKey = wifi ? "" : badgeNameFor(bc);
+        }
+        String sig = lp + "/" + ls + "/" + (wifi ? "w" : "m") + "/" + badgeKey;
 
         String idHash = Integer.toHexString(System.identityHashCode(main));
         boolean already = main.getDrawable() instanceof VStack;
@@ -732,6 +739,7 @@ public final class Engine {
             attachLayoutWatcher(main);
             // 颜色由系统 tint 驱动，不需要逐帧比对
             startColorTicker(main);
+            startBadgeTicker(main.getContext());
             main.setImageDrawable(composed);
             if (secondRoot != null) collapse(secondRoot);
             // 兜底：这个容器里凡是还带信号的兄弟节点（副卡另一份、制式图那一份）全收掉，
@@ -776,6 +784,41 @@ public final class Engine {
     /** 永久隐藏信号旁边的小制式图（制式标已画进图标） */
     /** 按当前数据网络制式选制式标（2G/3G/4G/5G/5GA） */
     /**
+     * 取「正在承载数据那张卡」的 TelephonyManager。
+     *
+     * 双卡机器上 getDataNetworkType() 拿的是默认 subId 的类型，未必是真正跑数据的那张
+     * —— 表现就是拉到 5G 却还显示 4G（下拉控制中心那份走的是系统 DisplayInfo，所以是对的）。
+     * 这里先按 SubscriptionManager 的默认数据卡建实例，拿不到再退回整机那份。
+     */
+    private static android.telephony.TelephonyManager dataTelephonyManager(
+            android.content.Context ctx) {
+        try {
+            android.telephony.SubscriptionManager sm =
+                    android.telephony.SubscriptionManager.from(ctx);
+            int subId = android.telephony.SubscriptionManager.getDefaultDataSubscriptionId();
+            if (subId == android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                java.util.List<android.telephony.SubscriptionInfo> subs =
+                        sm.getActiveSubscriptionInfoList();
+                if (subs != null && !subs.isEmpty()) {
+                    subId = subs.get(0).getSubscriptionId();
+                }
+            }
+            if (subId != android.telephony.SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+                android.telephony.TelephonyManager base =
+                        (android.telephony.TelephonyManager) ctx.getSystemService(
+                                android.content.Context.TELEPHONY_SERVICE);
+                if (base != null) return base.createForSubscriptionId(subId);
+            }
+        } catch (Throwable ignore) {}
+        try {
+            return (android.telephony.TelephonyManager) ctx.getSystemService(
+                    android.content.Context.TELEPHONY_SERVICE);
+        } catch (Throwable ignore) {
+            return null;
+        }
+    }
+
+    /**
      * 按当前数据网络制式选制式标。
      *
      * 5GA（5G-Advanced）在原厂是「NR 网络 + 已聚合多个 NR 载波」时才显示。
@@ -785,8 +828,7 @@ public final class Engine {
      */
     private static String badgeNameFor(android.content.Context ctx) {
         try {
-            android.telephony.TelephonyManager tm = (android.telephony.TelephonyManager)
-                    ctx.getSystemService(android.content.Context.TELEPHONY_SERVICE);
+            android.telephony.TelephonyManager tm = dataTelephonyManager(ctx);
             if (tm != null) {
                 int t = tm.getDataNetworkType();
                 switch (t) {
@@ -890,6 +932,38 @@ public final class Engine {
 
     private static int lastKnownLevel = -1;
     private static boolean tickerStarted;
+
+    /**
+     * 制式变化轮询。
+     *
+     * 切 4G/5G、开关 5G、换数据卡时，系统未必会重画信号图标，我们就没有机会重建制式标。
+     * 这里每 2.5 秒读一次当前制式，值一变就 refreshAll()，重启一次合成。
+     * 只比一个字符串，开销可以忽略。
+     */
+    private static String lastBadgeName;
+    private static boolean badgeTickerStarted;
+
+    private static void startBadgeTicker(final android.content.Context ctx) {
+        if (badgeTickerStarted) return;
+        badgeTickerStarted = true;
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        h.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    if (!isWifiConnected(ctx)) {
+                        String now = badgeNameFor(ctx);
+                        if (now != null && !now.equals(lastBadgeName)) {
+                            lastBadgeName = now;
+                            refreshAll();
+                        }
+                    } else {
+                        lastBadgeName = null;
+                    }
+                } catch (Throwable ignore) {}
+                h.postDelayed(this, 2500);
+            }
+        }, 2500);
+    }
 
     /**
      * 状态栏换色时系统不一定通知到我们（时钟会变但我们收不到回调），

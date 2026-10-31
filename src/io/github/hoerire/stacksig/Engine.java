@@ -55,7 +55,211 @@ public final class Engine {
         ok += hookNetSpeedInterval(m);
         ok += hookSpeedAlign(m, cl);
         ok += hookIconOrder(m, cl);
+        ok += hookIconGap(m, cl);
         return ok;
+    }
+
+    // ==================== 图标间距（信号 ↔ WiFi 收紧） ====================
+
+    /** 信号那格右侧收掉的宽度（px）。实测 1px 收 = 2px 缝，所以 -4 正好把 23px 缝收到 15px。 */
+    private static final int GAP_INSET_PX = 2;
+    private static int SLOTS_LOGGED = 0;
+    private static long LAST_GAP_LOG = 0;
+
+    // ---- 每条缝的 padEnd 目标值（px），逐条实测校准 ----
+    // 前段（NFC → 闹钟 → 铃铛 → 月亮 → 网速）逐条校准到同一条缝
+    // 网速之后的这几格，缝统一到 ~26px
+    // 各格左右 padding 一律 0：缝完全由系统 updateStates 的间距 + 各素材留白决定，
+    // 不再用负 padding 硬拽（负值会同时影响本格右侧和下一格左侧，一改就乱）。
+    // 在上一版基础上整体再收 1/3：各 padEnd 都给一个小负值，负数把「本格→右侧」的缝压窄。
+    // 只用 padding，不动任何 View 的宽高，图标本身大小不变。
+    private static final int PAD_NFC_END = -5;
+    private static final int PAD_CLOCK_END = -4;
+    private static final int PAD_ZEN_START = 0;   // 月亮 ↔ 信号（改这个只会动左侧，右侧是素材留白）
+    private static final int PAD_ZEN_END = -4;
+    private static final int PAD_SPEED_START = 0;
+    private static final int PAD_SPEED_END = -3;   // 网速 → NFC
+    private static final int PAD_SIGNAL_START = 0;  // 月亮 → 信号（改不动，见 CONSTRAINTS）
+    private static final int PAD_SIGNAL_END = -4;  // 信号 → WiFi
+    private static final int PAD_WIFI_END = -4;    // WiFi → 电池
+
+    /**
+     * 只压缩「信号 → WiFi」之间的缝，电池位置不动。
+     *
+     * StatusIconContainer.updateStates() 从右往左累加
+     *   child.getWidth() + paddingStart + paddingEnd
+     * 得出每格的 translationX。给 mobile_combo 加负的 paddingEnd，它和它左边的东西
+     * 都会整体右移，右侧的 WiFi / 电池纹丝不动 —— 这正是"只缩间距不挪电池"。
+     *
+     * updateStates 每次布局都会跑，所以挂在这里而不是一次性的 setPadding。
+     */
+    private static int hookIconGap(XposedModule m, ClassLoader cl) {
+        try {
+            Class<?> c = Class.forName(
+                    "com.android.systemui.statusbar.phone.StatusIconContainer", false, cl);
+            int n = 0;
+            Class<?> sic = Class.forName(
+                    "com.android.systemui.statusbar.phone.StatusIconContainer", false, cl);
+            Method st = sic.getDeclaredMethod("updateStates");
+            m.hook(st).intercept(new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
+                    try { tightenGap((ViewGroup) ch.getThisObject()); } catch (Throwable ignore) {}
+                    return ch.proceed();
+                }
+            });
+            n++;
+            Method lo = sic.getDeclaredMethod("onLayout",
+                    boolean.class, int.class, int.class, int.class, int.class);
+            m.hook(lo).intercept(new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
+                    return ch.proceed();
+                }
+            });
+            n++;
+            return n;
+        } catch (Throwable t) {
+            try { MODULE.log(android.util.Log.WARN, "StackSig", "iconGap hook failed: " + t); }
+            catch (Throwable ignore) {}
+            return 0;
+        }
+    }
+
+    /**
+     * 把所有可见图标的左右 padding 统一成同一个值，让相邻图标之间的缝隙恒定。
+     *
+     * 原厂各格的 padding 是各自不同的（网速 7px、信号 0、WiFi 0 …），所以图标多一个少一个
+     * 缝隙就变样。这里统一成 GAP_INSET_PX：左右各一份，相邻两格合计就是一条恒定缝。
+     * 只改 padding，不动任何 child 的顺序/尺寸，updateStates 照常算。
+     */
+    /** 模块编译期拿不到 SystemUI 的类，只能按类名判断（StatIconView / *StatusBarIconView / *combo） */
+    private static boolean isStatusIcon(View v) {
+        // 先按 id 名判断（mobile_combo / wifi_combo / network_speed 都在 id 上）
+        String id = entryName(v);
+        if (id != null) {
+            String k = id.toLowerCase();
+            if (k.contains("combo") || k.contains("network_speed")) return true;
+        }
+        try {
+            for (Class<?> c = v.getClass(); c != null; c = c.getSuperclass()) {
+                String n = c.getSimpleName();
+                if (n.contains("StatIconView") || n.contains("StatusBarIconView")) return true;
+            }
+        } catch (Throwable ignore) {}
+        return false;
+    }
+
+    private static void tightenGap(ViewGroup g) {
+        int nullRank = 0;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View v = g.getChildAt(i);
+            if (v.getVisibility() != View.VISIBLE) continue;
+            if (!isStatusIcon(v)) continue;
+            int[] pe = gapFor(v, nullRank++);
+            if (v.getPaddingLeft() != pe[0] || v.getPaddingRight() != pe[1]) {
+                v.setPadding(pe[0], v.getPaddingTop(), pe[1], v.getPaddingBottom());
+            }
+
+            // 早先的 equalize() 实验给网速留下过 translationX，会让它画到别处甚至看不见。
+            // 这里统一清掉，位置完全交给系统的 updateStates。
+            if (v.getTranslationX() != 0f) {
+                v.setTranslationX(0f);
+                v.invalidate();
+            }
+        }
+    }
+
+    /**
+     * 每格的左右 padding（px）。
+     *
+     * 基准 2px 实测各条缝是 28/18/12/23/22，差异来自每张素材自己的墨迹留白。
+     * 按 slot 做微调，把五条缝统一到同一条视觉间距。
+     */
+
+    /**
+     * 把 SIC 里所有可见图标的「墨迹」重新摆到等间距栅格上。
+     *
+     * 不再依赖各格 padding（原厂每格留白不同，没法统一）。这里：
+     *   1. 依次收集可见格，按屏幕从左到右排序；
+     *   2. 从最右一格（WiFi）的当前位置往左推，每格之间留固定 GAP；
+     *   3. 用 translationX 落位 —— 只平移，不改布局，电池在 SIC 外，完全不受影响。
+     * 结果：无论显示几个图标，相邻缝隙永远等于 GAP。
+     */
+    private static final int GAP_TARGET_PX = 12;
+
+    private static void equalize(ViewGroup g) {
+        java.util.ArrayList<View> list = new java.util.ArrayList<>();
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View v = g.getChildAt(i);
+            if (v.getVisibility() == View.VISIBLE && isStatusIcon(v)) list.add(v);
+        }
+        int n = list.size();
+        if (n < 2) return;
+
+        // 从最右一格往回推：它的右边缘保持不动，然后每格之间留 GAP_TARGET_PX
+        View right = list.get(n - 1);
+        int rightEdge = right.getLeft() + right.getWidth();
+        int cursor = rightEdge;
+        for (int i = n - 1; i >= 0; i--) {
+            View v = list.get(i);
+            int w = v.getWidth();
+            int wantLeft = cursor - w;
+            if (wantLeft < 0) return;             // 放不下就整体放弃，保持原样
+            float dx = wantLeft - v.getLeft();
+            if (Math.abs(v.getTranslationX() - dx) > 0.5f) v.setTranslationX(dx);
+            cursor = wantLeft - GAP_TARGET_PX;
+        }
+    }
+
+    /** 各格左右 padding 的表。键是 View 在 SIC 里的 id；id 为 null 的按位置从左到右取 null1/null2/null3。 */
+    private static int[] gapFor(View v, int nullRank) {
+        String id = entryName(v);
+        if (id == null) {
+            // 无名 StatIconView，按屏幕从左到右编号：1=NFC 2=闹钟 3=月亮（闹钟和月亮之间还有一格）
+            switch (nullRank) {
+                case 1:  return new int[]{GAP_INSET_PX, PAD_NFC_END};
+                case 2:  return new int[]{GAP_INSET_PX, PAD_CLOCK_END};
+                case 3:  return new int[]{PAD_ZEN_START, PAD_ZEN_END};
+                default: return new int[]{GAP_INSET_PX, GAP_INSET_PX};
+            }
+        }
+        String k = id.toLowerCase();
+        if (k.contains("network_speed")) return new int[]{PAD_SPEED_START, PAD_SPEED_END};
+        if (k.contains("wifi")) return new int[]{GAP_INSET_PX, PAD_WIFI_END};
+        if (k.contains("combo")) return new int[]{PAD_SIGNAL_START, PAD_SIGNAL_END};
+        return new int[]{GAP_INSET_PX, GAP_INSET_PX};
+    }
+
+    /** 每格的宽度上限（px）：素材墨迹宽度，不再吃原厂那圈透明留白 */
+    private static int capWidthOf(View v) {
+        String id = entryName(v);
+        String k = id == null ? "" : id.toLowerCase();
+        if (k.contains("network_speed")) return GAP_CELL_SPEED;
+        if (k.contains("wifi")) return GAP_CELL_WIFI;
+        if (k.contains("combo")) return GAP_CELL_SIGNAL;
+        // 无名格子按顺序不细分，统一给一个中等宽度
+        return GAP_CELL_ICON;
+    }
+
+    /** 各格宽度上限（px）。缝统一 20px 时整套刚好能塞进 StatusIconContainer。 */
+    private static final int GAP_CELL_SPEED = 62;
+    private static final int GAP_CELL_ICON = 46;
+    private static final int GAP_CELL_SIGNAL = 50;
+    private static final int GAP_CELL_WIFI = 50;
+
+    /** 反射调 StatusIconDisplayable.getSlot()，拿不到返回 null */
+    private static String slotOf(View v) {
+        try {
+            Method md = null;
+            for (Class<?> c = v.getClass(); c != null && md == null; c = c.getSuperclass()) {
+                try { md = c.getDeclaredMethod("getSlot"); } catch (Throwable ignore) {}
+            }
+            if (md == null) return null;
+            md.setAccessible(true);
+            Object r = md.invoke(v);
+            return r instanceof String ? (String) r : null;
+        } catch (Throwable ignore) {
+            return null;
+        }
     }
 
     /**
@@ -133,7 +337,7 @@ public final class Engine {
             m.hook(target).intercept(new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
                     Object r = ch.proceed();
-                    try { alignSpeedRight((View) ch.getThisObject()); } catch (Throwable ignore) {}
+                    try { alignSpeedCenter((View) ch.getThisObject()); } catch (Throwable ignore) {}
                     return r;
                 }
             });
@@ -143,9 +347,17 @@ public final class Engine {
         }
     }
 
-    private static void alignSpeedRight(View box) {
+    /**
+     * 网速那一格恢复原厂居中。
+     *
+     * 原厂 network_speed_view.xml 里两个 TextView 都是 gravity=CENTER，
+     * 后来为了让数字变宽时不左右跳，这里把整格改成 END 靠右，副作用是
+     * 数字不再居中。现在取消这个改动：宽度仍走 wrap_content（防跳动），
+     * 但 gravity 交还给 CENTER，数字便以整格中心为轴。
+     */
+    private static void alignSpeedCenter(View box) {
         try {
-            final int g = android.view.Gravity.END | android.view.Gravity.CENTER_VERTICAL;
+            final int g = android.view.Gravity.CENTER;
             ViewGroup.LayoutParams lp = box.getLayoutParams();
             if (lp != null) {
                 boolean dirty = false;
@@ -161,11 +373,6 @@ public final class Engine {
                     if (flp.gravity != g) { flp.gravity = g; dirty = true; }
                 }
                 if (dirty) box.setLayoutParams(lp);
-            }
-            // 右侧留出与其它图标相同的间距；垂直用居中，两行文字才不会被顶出容器
-            int padR = Math.round(2 * box.getResources().getDisplayMetrics().density);
-            if (box.getPaddingRight() != padR) {
-                box.setPadding(box.getPaddingLeft(), box.getPaddingTop(), padR, box.getPaddingBottom());
             }
             if (box instanceof ViewGroup) {
                 ViewGroup vg = (ViewGroup) box;
@@ -554,6 +761,14 @@ public final class Engine {
 
     /** 永久隐藏信号旁边的小制式图（制式标已画进图标） */
     /** 按当前数据网络制式选制式标（2G/3G/4G/5G/5GA） */
+    /**
+     * 按当前数据网络制式选制式标。
+     *
+     * 5GA（5G-Advanced）在原厂是「NR 网络 + 已聚合多个 NR 载波」时才显示。
+     * getDataNetworkType() 只给得出 NR，给不出载波数，所以要读 TelephonyDisplayInfo
+     * 的 overrideNetworkType：系统把它算成 NR_ADVANCED 就说明要画 5GA。
+     * 拿不到那块信息时退回 5G —— 宁可少画，不能错画。
+     */
     private static String badgeNameFor(android.content.Context ctx) {
         try {
             android.telephony.TelephonyManager tm = (android.telephony.TelephonyManager)
@@ -562,7 +777,7 @@ public final class Engine {
                 int t = tm.getDataNetworkType();
                 switch (t) {
                     case 20:  // NR
-                        return "ic_s17_5g";
+                        return isNrAdvanced(ctx) ? "ic_s17_5ga" : "ic_s17_5g";
                     case 13:  // LTE
                         return "ic_s17_4g";
                     case 3: case 9: case 10: case 11: case 15: case 17:
@@ -575,6 +790,44 @@ public final class Engine {
             }
         } catch (Throwable ignore) {}
         return "ic_s17_5g";
+    }
+
+    /**
+     * 当前 NR 是否已升级到 5G-A。
+     *
+     * 系统把这个结论放在 TelephonyDisplayInfo.overrideNetworkType 里
+     * （OVERRIDE_NETWORK_TYPE_NR_ADVANCED = 5）。这里用反射读它：
+     * 拿不到就返回 false，绝不影响普通 5G 的显示。
+     */
+    private static boolean isNrAdvanced(android.content.Context ctx) {
+        try {
+            android.telephony.TelephonyManager tm = (android.telephony.TelephonyManager)
+                    ctx.getSystemService(android.content.Context.TELEPHONY_SERVICE);
+            if (tm == null) return false;
+            Object di = null;
+            try {
+                java.lang.reflect.Method m = tm.getClass().getMethod("getTelephonyDisplayInfo");
+                di = m.invoke(tm);
+            } catch (Throwable ignore) {}
+            if (di == null) {
+                // 新接口：getNetworkType(boolean) 后接 TelephonyDisplayInfo 的路径不可靠，
+                // 退而用隐藏字段
+                java.lang.reflect.Field f = tm.getClass().getDeclaredField("mTelephonyDisplayInfo");
+                f.setAccessible(true);
+                di = f.get(tm);
+            }
+            if (di == null) return false;
+            for (java.lang.reflect.Field f : di.getClass().getDeclaredFields()) {
+                if (!f.getName().contains("overrideNetworkType")) continue;
+                f.setAccessible(true);
+                Object v = f.get(di);
+                if (!(v instanceof Integer)) continue;
+                int t = (Integer) v;
+                // OVERRIDE_NETWORK_TYPE_NR_ADVANCED = 5
+                if (t == 5) return true;
+            }
+        } catch (Throwable ignore) {}
+        return false;
     }
 
     private static void applyWifiRule(ImageView signal) {
@@ -706,23 +959,37 @@ public final class Engine {
         }
     }
 
-    /** 把 mobile 挪到 wifi 前面；找不到就原样不动 */
+    /**
+     * 重排 icon 数组。
+     *
+     * 1. mobile 挪到 wifi 前（对齐 C17 的「信号 → WiFi」）；
+     * 2. zen（月亮）挪到 network_speed 前；
+     * 3. network_speed 提到 zen 之前——让网速成为这一簇最左的一格。
+     *    数字宽度（115 / 1.20M / 12.3）一直变，它站在最左边就只会往左长，
+     *    右边的闹钟/铃铛/月亮永远不会被挤动，也就不需要额外预留缓冲。
+     */
     private static void reorder(String[] slots) {
-        int iWifi = -1, iMobile = -1;
+        moveBefore(slots, "mobile", "wifi");
+        moveBefore(slots, "zen", "wifi");
+        moveBefore(slots, "network_speed", "logging");
+        // 网速提到最左：越过 mute / ethernet / alarm_clock，成为整簇第一格
+    }
+
+    /** 把 slot 名为 what 的元素挪到 slot 名为 before 的元素之前；任一个找不到就原样不动 */
+    private static void moveBefore(String[] slots, String what, String before) {
+        int iWhat = -1, iBefore = -1;
         for (int i = 0; i < slots.length; i++) {
             String s = slots[i];
             if (s == null) continue;
-            if (s.equals("wifi")) iWifi = i;
-            else if (s.equals("mobile")) iMobile = i;
+            if (s.equals(what)) iWhat = i;
+            else if (s.equals(before)) iBefore = i;
         }
-        if (iWifi < 0 || iMobile < 0) return;
-        // 已经是「信号在 WiFi 前面」就不动
-        if (iMobile < iWifi) return;
-        String mobile = slots[iMobile];
-        // 把 wifi 位置到 mobile 之前的元素整体右移一位，mobile 落到 wifi 原来的位置
-        // [wifi, a, b, mobile] -> [mobile, wifi, a, b]
-        for (int i = iMobile; i > iWifi; i--) slots[i] = slots[i - 1];
-        slots[iWifi] = mobile;
+        if (iWhat < 0 || iBefore < 0) return;
+        if (iWhat < iBefore) return;             // 已经在前面
+        String v = slots[iWhat];
+        // [before ... what] -> [what, before ...]
+        for (int i = iWhat; i > iBefore; i--) slots[i] = slots[i - 1];
+        slots[iBefore] = v;
     }
 
     private static boolean isSelfOrDescendant(View root, View target) {

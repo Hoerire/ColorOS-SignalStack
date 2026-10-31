@@ -20,10 +20,11 @@ import android.graphics.drawable.Drawable;
  */
 public final class VStack extends Drawable {
 
-    private static final float BADGE_H = 0.25f;     // 制式标高度占图标高度
-    private static final float BADGE_RATIO = 1.38f; // 14.42 / 10.42
-    private static final float BADGE_Y = 0.08f;
-    private static final float BADGE_X = 0.08f;   // 制式标左缘（墨迹在画布中从 x=2.28/19 起）
+    // 制式标：高度统一，宽度按素材自身宽高比（5GA 三个字符自然更宽，但不许压扁）
+    private static final float BADGE_H = 0.30f;
+    private static final float BADGE_RATIO = 1.38f; // 素材拿不到 intrinsic 时的兜底比例
+    private static final float BADGE_Y = 0.06f;
+    private static final float BADGE_X = 0f;      // 贴左边缘；再往左会被 View 边界裁掉
 
     private final Drawable primary;
     private final Drawable secondary;
@@ -104,8 +105,13 @@ public final class VStack extends Drawable {
             }
 
             if (badge != null) {
+                // 高度统一，宽度按素材自身宽高比算：
+                // 2G/4G/5G 约 1.4:1，5GA 是「5G+副标」约 1.9:1 —— 按固定比例缩放会把 5GA 压扁裁掉。
                 int bh = Math.round(b.height() * BADGE_H);
-                int bw = Math.round(bh * BADGE_RATIO);
+                int iw = badge.getIntrinsicWidth();
+                int ih = badge.getIntrinsicHeight();
+                int bw = (iw > 0 && ih > 0) ? Math.round(bh * (float) iw / ih)
+                                            : Math.round(bh * BADGE_RATIO);
                 int bl = b.left + Math.round(b.width() * BADGE_X);
                 int bt = b.top + Math.round(b.height() * BADGE_Y);
                 badge.setBounds(bl, bt, bl + bw, bt + bh);

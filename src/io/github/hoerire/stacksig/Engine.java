@@ -750,9 +750,6 @@ public final class Engine {
                             } catch (Throwable ignore) {}
                         }
                     });
-                } else if (n.contains("inout")) {
-                    // 上传/下载箭头一律撤掉（制式标已画进信号图标）
-                    hideHard(iv);
                 } else if (n.contains("wifi")) {
                     // 断/连 WiFi 时系统会刷新 wifi 图标，顺势让信号图标重算
                     refreshAll();
@@ -1116,7 +1113,12 @@ public final class Engine {
     private static void hideTypeAndInout(View v, int depth) {
         if (depth > 6 || v == null) return;
         String n = v.getId() != View.NO_ID ? entryName(v) : null;
-        if (n != null && (n.contains("mobile_type") || n.contains("inout"))) {
+        // 收掉制式小图（制式标已画进信号图标）。
+        // 上传/下载箭头只在 WiFi 下保留：移动数据下显示会和制式标挤在一起，显得割裂。
+        if (n != null && n.contains("mobile_type")) {
+            hideHard(v);
+        }
+        if (n != null && n.contains("inout") && !isWifiConnected(v.getContext())) {
             hideHard(v);
         }
         if (v instanceof ViewGroup) {

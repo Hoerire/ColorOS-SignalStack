@@ -54,6 +54,7 @@ public final class Engine {
         // 颜色交给系统（见 VStack 注释），这里不再干预
         ok += hookNetSpeedInterval(m);
         ok += hookSpeedAlign(m, cl);
+        ok += hookIconOrder(m, cl);
         return ok;
     }
 
@@ -671,6 +672,57 @@ public final class Engine {
             }
         }
         return null;
+    }
+
+    // ==================== 图标顺序（对齐 ColorOS 17） ====================
+
+    /**
+     * ColorOS 16 的 config_statusBarIcons 里 wifi 排在 mobile 前面；
+     * ColorOS 17 把 mobile 提到了 wifi 前面，于是变成「信号 → WiFi」。
+     *
+     * StatusBarIconList 的构造函数直接吃这个 String[]，数组顺序就是显示顺序。
+     * 这里只在构造时交换 wifi / mobile 的下标，纯数据层操作，不碰视图树。
+     */
+    private static int hookIconOrder(XposedModule m, ClassLoader cl) {
+        try {
+            Class<?> c = Class.forName(
+                    "com.android.systemui.statusbar.phone.ui.StatusBarIconList", false, cl);
+            final java.lang.reflect.Constructor<?> ctor = c.getDeclaredConstructor(String[].class);
+            m.hook(ctor).intercept(new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    try {
+                        Object arg = chain.getArg(0);
+                        if (arg instanceof String[]) reorder((String[]) arg);
+                    } catch (Throwable ignore) {}
+                    return chain.proceed();
+                }
+            });
+            return 1;
+        } catch (Throwable t) {
+            try { MODULE.log(android.util.Log.WARN, "StackSig", "iconOrder hook failed: " + t); }
+            catch (Throwable ignore) {}
+            return 0;
+        }
+    }
+
+    /** 把 mobile 挪到 wifi 前面；找不到就原样不动 */
+    private static void reorder(String[] slots) {
+        int iWifi = -1, iMobile = -1;
+        for (int i = 0; i < slots.length; i++) {
+            String s = slots[i];
+            if (s == null) continue;
+            if (s.equals("wifi")) iWifi = i;
+            else if (s.equals("mobile")) iMobile = i;
+        }
+        if (iWifi < 0 || iMobile < 0) return;
+        // 已经是「信号在 WiFi 前面」就不动
+        if (iMobile < iWifi) return;
+        String mobile = slots[iMobile];
+        // 把 wifi 位置到 mobile 之前的元素整体右移一位，mobile 落到 wifi 原来的位置
+        // [wifi, a, b, mobile] -> [mobile, wifi, a, b]
+        for (int i = iMobile; i > iWifi; i--) slots[i] = slots[i - 1];
+        slots[iWifi] = mobile;
     }
 
     private static boolean isSelfOrDescendant(View root, View target) {

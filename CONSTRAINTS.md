@@ -23,19 +23,23 @@
 
 ## 二、正确做法
 
-### 改图标顺序（信号 ↔ WiFi 位置）
+### 改图标顺序
 
-**不要碰视图树。** 顺序由 `config_statusBarIcons` 这个数组决定：
+**不要碰视图树。** 顺序由 `config_statusBarIcons` 这个数组决定，实测原厂 46 项：
 
-| 版本 | 顺序 |
-|---|---|
-| ColorOS 16 | `... wifi, nosim_all, nosim_one, nosim_two, mobile, ...` |
-| ColorOS 17 | `... stacked_mobile, mobile, nosim_all, nosim_one, nosim_two, wifi, ...` |
+```
+... 28=mute 29=ethernet 30=network_speed 31=vowifi 32=volte
+    33=zen 34=wifi 35..37=nosim 38=mobile 39=dynamic_info ... 45=battery
+```
 
 `StatusBarIconList(String[])` 构造函数的入参顺序 == 屏幕显示顺序。
 Hook 这个构造函数，在 `proceed()` 之前重排数组即可，纯数据层，零崩溃风险。
 
-实现见 `Engine.hookIconOrder()` / `Engine.reorder()`。
+实现见 `Order.hookIconOrder()` / `Order.reorder()` / `Order.moveBefore()`。
+
+**当前顺序**：网速 → NFC → 闹钟 → 免打扰 → 月亮 → 信号 → WiFi → 电池
+（`moveBefore(network_speed, logging)` 把网速顶到最前，
+再 `moveBefore(zen, wifi)`、`moveBefore(mobile, wifi)`）
 
 ### 改信号图标外观
 
@@ -48,7 +52,27 @@ Hook 这个构造函数，在 `proceed()` 之前重排数组即可，纯数据�
 **画到 View 边界外会被裁剪**，加宽 `intrinsicWidth` 会被电池顶掉。
 所以大号制式标放不进信号右侧，这个方向已彻底否决。
 
-### 网速视图
+### 网速：数值与刷新都由我们接管
+
+**不要改原厂的 Handler 排期。** 曾经把它从 4 秒压到 1 秒，但没改差分窗口 ——
+分母忽大忽小，瞬时抖动被放大，实测 1.2 KB/s 会显示成 7.00（虚高 6 倍）。
+
+正确做法（见 `Speed.java`）：
+
+1. 每秒读累计收发字节，按**真实时间差**算速率（B/s）；
+2. hook `NetworkSpeedIconState.getSpeedText()` 返回我们的值 ——
+   它返回的就是字节/秒，单位换算、KB/s ↔ MB/s、小数位全归原厂；
+3. 每秒反射调一次 `NetworkSpeedView.applyNetworkState(mState)` 触发重绘，
+   否则原厂 4 秒才刷一次，算得再快也看不出来。
+
+**统计范围只能算物理网卡**：`wlan0` / `rmnet_data*` / `eth*`。
+不能用 `TrafficStats.getTotalRxBytes()` —— 它把所有接口相加，
+走 VPN/代理时同一份数据经过 `tun0` 和 `wlan0` 被算两遍，实测翻倍。
+
+**SystemUI 读不到 `/sys/class/net`**（SELinux 域限制），但 `/proc/net/dev` 能读。
+所以判断接口只能靠名字前缀，不能遍历 sysfs。
+
+### 网速视图的排版
 
 工厂布局 `network_speed_view.xml` 里两个 TextView 都是 `gravity=CENTER`。
 **不要改成 END** —— 字形会贴死视图边缘被 `clipChildren` 裁掉（表现为 "S" 消失）。
@@ -146,127 +170,44 @@ su -c "grep 'StackSig' $L" | tail -20
 
 ## 七、当前状态
 
-**已发布**：v1.8 / versionCode 44（修复蓝牙图标异常显示）。
+**已发布**：v1.9 / versionCode 46。
+- 源码仓库：[Hoerire/ColorOS-SignalStack](https://github.com/Hoerire/ColorOS-SignalStack)（tag `1-1.9`）
+- LSPosed 仓库：[io.github.hoerire.stacksig](https://github.com/Xposed-Modules-Repo/io.github.hoerire.stacksig)（tag `46-1.9`）
 
-v1.8 关键结论：
-- 蓝牙异常 = `gapFor()` 用「可见序号」绑定 padding，蓝牙排到第 3 位时被当成月亮套用了 0/-4。
-  已改为**只按 slot 名**匹配，不匹配的一律中性值。
-- 尝试过「实测墨迹宽度自适应」「固定 View 宽度」等方案，视觉上割裂，已回退。
-  最终方案：`GAP_INSET_PX = 0` 统一 padding，只给蓝牙额外 +1（它右边是制式标）。
-- 七条缝不可能完全一致：制式标画在信号格内部左上角，与信号柱共用一格，
-  「5G↔信号柱」天然只有 6px，除非新增独立格子（会触发 SystemUI 崩溃，禁止）。
+**注意**：versionName 是 1.9，versionCode 是 46 —— code 必须递增，
+否则装过 45 的设备会认为没更新，`pm install -r` 直接跳过。
 
-**历史发布**：v1.6 / versionCode 40。
-**已装机**：v1.8 / versionCode 42（状态栏排布 + 制式标）。
+### 代码结构（v1.9 重构后）
 
-v1.8 定型内容：
-1. 顺序：网速 → NFC → 闹钟 → 免打扰 → 月亮 → 信号 → WiFi → 电池（网速顶最左）
-2. 间距：padding 逐条校准，实测缝 16/20/16/22/16 px
-3. 制式标：`BADGE_H=0.30`、`BADGE_X=0`；宽度改按素材自身宽高比算，
-   5GA（31:16）不再被 1.38 的固定比例压扁裁掉
-4. 2G 素材 viewport 从 24×24 收到墨迹实际范围 11.4×7.3（加 group 平移），
-   这样四种制式的 intrinsic 比例一致，高度才对得齐
-5. 5GA 判断：`getDataNetworkType()==NR` 且 `TelephonyDisplayInfo.overrideNetworkType==5`
-   （OVERRIDE_NETWORK_TYPE_NR_ADVANCED）才画 5GA，否则画 5G；拿不到就退回 5G
+| 文件 | 职责 |
+|---|---|
+| `Engine.java` | 信号合成、颜色、可见性、边距 |
+| `Speed.java` | 网速采样与刷新 |
+| `Spacing.java` | 图标间距（padding） |
+| `Order.java` | 图标顺序（数组重排） |
+| `VStack.java` | 双排信号绘制、制式标 |
+| `Res17.java` | 资源加载 |
 
-**drawable 硬边界**：badge 画不到 View 左右边界之外（`BADGE_X` 负值会被裁，实测 -0.10 时 4G 的「4」消失）。
-现在 `VStack.draw()` 里做了夹取：宽度不超过 View 宽，右缘超出就整体左收，左缘小于 0 就贴边。
-这样 5GA（比 4G 宽约 8px）也不会被切掉「5」。
+### v1.9 定型内容
 
-### ⚠️ 间距调不动的真正原因（2026-10-31 查明）
+1. 顺序：网速 → NFC → 闹钟 → 免打扰 → 月亮 → 信号 → WiFi → 电池
+2. 间距：`GAP_INSET_PX = 0` 统一 padding，只给蓝牙额外 +1
+3. 制式标：`BADGE_H=0.30`、`BADGE_X=0.02`；宽度按素材自身宽高比算
+4. 2G 素材 viewport 收到墨迹实际范围，四种制式 intrinsic 比例一致
+5. 5GA 判断：NR + `TelephonyDisplayInfo.overrideNetworkType==5`
+6. 网速：真实字节数、1 秒刷新、只算物理网卡
+7. 上传/下载箭头只在 WiFi 下显示
 
-`gapFor()` 原来用「可见格从左到右的序号」(`nullRank`) 绑定 padding。
-**图标显隐一变，序号就错位**，`case 1/2/3` 指向的就不是原来那个图标了 ——
-表现就是「改了没反应 / 越改越乱」。
+### 仓库约定
 
-修法：**按 slot 名绑定**。`getSlot()` 声明在 `StatusIconDisplayable` 接口上，
-只遍历父类拿不到，必须再遍历接口。现在 `slotOf()` 会返回
-`nfc` / `alarm_clock` / `mobile` / `network_speed` / `satellite` 等真实名字。
+**LSPosed 仓库只放文档和图片**（README / LICENSE / PNG），源码不放。
+源码只在主仓库维护，避免两边不同步。
 
-### 制式标不跟着变（5G 显示成 4G）的两个坑
+### 版本号同步（老坑）
 
-1. **取错 TelephonyManager**：双卡机器上 `getDataNetworkType()` 用的是默认 subId，
-   未必是真正跑数据的那张卡。要先用 `SubscriptionManager.getDefaultDataSubscriptionId()`
-   拿 subId，再 `createForSubscriptionId(subId)`。见 `dataTelephonyManager()`。
-2. **重建条件里没有制式**：`stack()` 用 `sig` 做去重，原来是
-   `等级/副卡/wifi`，切 4G→5G 时等级没变 → `sig` 相同 → 直接 return，制式标永远停在旧值。
-   现在 `sig` 里带上 `badgeNameFor(ctx)`，并且加了 `startBadgeTicker()` 每 2.5 秒比对一次，
-   因为系统切制式时未必会重画信号图标。
-
-**padding 符号的方向**（实测，别再反）：
-- 给某格 `paddingEnd` **正值** → 它自己往**左**移（因为 updateStates 从右往左累加，宽度变大把它推左）；
-- **负值** → 往**右**挤，会更贴近右边的邻居。
-
-所以「让闹钟离信号远一点」= `PAD_CLOCK_END` 用正数（当前 3）。
-
-v1.7 内容 = v1.6 + `Engine.hookIconGap()` / `tightenGap()`（信号↔WiFi 间距收紧）。
-
-**已安装**：v1.7，顺序「网速 → 信号 → WiFi → 电池」。
-
-### v1.8 状态栏排布（最终形态，2026-10-31 定稿）
-
-顺序：**网速 → NFC → 闹钟 → 免打扰 → 月亮 → 信号 → WiFi → 电池**
-
-- 网速提到数组最前（越过 logging/nfc/alarm_clock），它顶在最左，数字变宽只会往左长，
-  右边图标永远不会被挤动，所以不需要给它预留缓冲。
-- 月亮（zen）从网速右侧挪到网速左侧：`moveBefore(slots, "zen", "wifi")`。
-- 各格左右 padding 用一张小表逐条校准，实测缝：16/20/16/22/16 px（差 6px）。
-
-**padding 的方向性（实测结论，别再猜）**：
-
-- 一格的 **paddingEnd** → 只影响它**左边**那道缝；
-- 一格的 **paddingStart** → 只影响它**右边**那道缝；
-- 「月亮 → 信号」那 24px 是月亮 drawable 自带的右侧透明留白，
-  两个方向的 padding 全试过都改不动，除非改 View 宽度（会连图标一起变小，已否决）。
-  当前 22px 已经是 padding 能做到的极限。
-  **只用 padding，不动任何 View 宽高** —— 改宽度会连带图标大小，用户明确否决。
-- 曾经试过「给每格锁宽以避免超出容器」：图标被压小，已撤销。
-- 曾经试过 equalize()（onLayout 后重算 translationX）：与系统 updateStates 抢坐标系，
-  网速被画到屏幕外，已彻底删除，并在 tightenGap 里把残留 translationX 归零。
-
-### 让「电池不动、只缩间距」真的成立
-
-`StatusIconContainer.updateStates()` 从右往左累加 `width + paddingStart + paddingEnd`
-得到每格的 `translationX`。所以：
-
-- 给 `mobile_combo` 加**负的 paddingEnd**，它和它左边的一切整体右移，右侧 WiFi / 电池纹丝不动；
-- 实测 1px 负 padding ≈ 2px 位移，`-4` 正好把「信号↔WiFi」的 23px 缝收到 15px（约 1/3）；
-- `updateStates` 每次布局都跑，所以 hook 它而不是一次性 setPadding，否则会被冲掉。
-
-实测坐标（1272 宽，1dp=3.5px）：
-
-| 位置 | v1.6 | v1.7 |
-|---|---|---|
-| 网速 ink | 902–971 | 903–966 |
-| 信号 ink | 979–1029 | 988–1038 |
-| WiFi ink | 1052–1108 | 1053–1109 |
-| 电池 ink | 1130–1207 | **1131–1208 不变** |
-| 信号↔WiFi 缝 | 23px | **15px** |
-
-**踩过的坑**：改 `status_bar_end_side_container` 的 paddingRight 会把整簇（含电池）右移 56px，
-用户明确否决——电池必须固定原位。别再动那一层。
-
-**版本号必须两处同步改**：
-- `meta/META-INF/xposed/module.prop` → `version` / `versionCode`（LSPosed 读这个）
-- `meta/AndroidManifest.xml` → `android:versionName` / `android:versionCode`（pm 读这个）
-
-只改一处会导致 `pm install -r` 认为是同版本而不更新，`dumpsys` 显示的版本号也对不上。
-
-**产物大小参考**（正常范围）：
-
-| 版本 | 文件 | 内容 | dex |
-|---|---|---|---|
-| v1.5 | 68007 | 58664 | 34100 |
-| v1.6 | 72103 | 59774 | 35212 |
-
-差距全在 dex（新增排序逻辑），文件尺寸跳变来自 `zipalign -p 4` 的 4096 页对齐。
-
-**已否决的方向**（不要再试）：
-- 大号制式标放信号右侧 —— 67px View 边界，画出去被裁
-- 加宽信号 `intrinsicWidth` —— 被电池顶掉
-- 制式独立放到信号与电池之间 —— 容器没有多余空间
-- 借 `oplus_satellite` slot —— 系统不为闲置 slot 建 view（实测容器恒为 21 个 child）
-- 撑开 WiFi 槽 —— 它在最左端，会推挤网速/信号并被裁剪
+两处必须同时改，只改一处会导致 `pm install -r` 认为是同版本而不更新：
+- `meta/META-INF/xposed/module.prop` → `version` / `versionCode`
+- `meta/AndroidManifest.xml` → `android:versionName` / `android:versionCode`
 
 ---
 

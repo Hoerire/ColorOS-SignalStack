@@ -159,8 +159,25 @@ v1.8 定型内容：
 5. 5GA 判断：`getDataNetworkType()==NR` 且 `TelephonyDisplayInfo.overrideNetworkType==5`
    （OVERRIDE_NETWORK_TYPE_NR_ADVANCED）才画 5GA，否则画 5G；拿不到就退回 5G
 
-**drawable 硬边界**：badge 画不到 View 左边界之外（`BADGE_X` 负值会被裁，实测 -0.10 时 4G 的「4」消失）。
-想再往左只能加宽 View，会牵动整个布局，暂缓。
+**drawable 硬边界**：badge 画不到 View 左右边界之外（`BADGE_X` 负值会被裁，实测 -0.10 时 4G 的「4」消失）。
+现在 `VStack.draw()` 里做了夹取：宽度不超过 View 宽，右缘超出就整体左收，左缘小于 0 就贴边。
+这样 5GA（比 4G 宽约 8px）也不会被切掉「5」。
+
+### ⚠️ 间距调不动的真正原因（2026-10-31 查明）
+
+`gapFor()` 原来用「可见格从左到右的序号」(`nullRank`) 绑定 padding。
+**图标显隐一变，序号就错位**，`case 1/2/3` 指向的就不是原来那个图标了 ——
+表现就是「改了没反应 / 越改越乱」。
+
+修法：**按 slot 名绑定**。`getSlot()` 声明在 `StatusIconDisplayable` 接口上，
+只遍历父类拿不到，必须再遍历接口。现在 `slotOf()` 会返回
+`nfc` / `alarm_clock` / `mobile` / `network_speed` / `satellite` 等真实名字。
+
+**padding 符号的方向**（实测，别再反）：
+- 给某格 `paddingEnd` **正值** → 它自己往**左**移（因为 updateStates 从右往左累加，宽度变大把它推左）；
+- **负值** → 往**右**挤，会更贴近右边的邻居。
+
+所以「让闹钟离信号远一点」= `PAD_CLOCK_END` 用正数（当前 3）。
 
 v1.7 内容 = v1.6 + `Engine.hookIconGap()` / `tightenGap()`（信号↔WiFi 间距收紧）。
 

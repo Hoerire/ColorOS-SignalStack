@@ -24,7 +24,7 @@ public final class VStack extends Drawable {
     private static final float BADGE_H = 0.30f;
     private static final float BADGE_RATIO = 1.38f; // 素材拿不到 intrinsic 时的兜底比例
     private static final float BADGE_Y = 0.06f;
-    private static final float BADGE_X = 0f;      // 贴左边缘；再往左会被 View 边界裁掉
+    private static final float BADGE_X = -0.02f;  // 信号左上角偏左；再负会被 View 边界裁掉
 
     private final Drawable primary;
     private final Drawable secondary;
@@ -105,14 +105,17 @@ public final class VStack extends Drawable {
             }
 
             if (badge != null) {
-                // 高度统一，宽度按素材自身宽高比算：
-                // 2G/4G/5G 约 1.4:1，5GA 是「5G+副标」约 1.9:1 —— 按固定比例缩放会把 5GA 压扁裁掉。
                 int bh = Math.round(b.height() * BADGE_H);
                 int iw = badge.getIntrinsicWidth();
                 int ih = badge.getIntrinsicHeight();
                 int bw = (iw > 0 && ih > 0) ? Math.round(bh * (float) iw / ih)
                                             : Math.round(bh * BADGE_RATIO);
+                if (bw > b.width()) bw = b.width();      // 绝不超过 View 宽度，否则会被裁
+                // 左对齐在 BADGE_X 处；若右侧会越界，就往左收，保证整枚制式标可见。
+                // 5GA 比 4G 宽，靠这条规则自动往左让，不会被切掉「5」。
                 int bl = b.left + Math.round(b.width() * BADGE_X);
+                if (bl + bw > b.right) bl = b.right - bw;
+                if (bl < b.left) bl = b.left;
                 int bt = b.top + Math.round(b.height() * BADGE_Y);
                 badge.setBounds(bl, bt, bl + bw, bt + bh);
                 badge.setAlpha(alpha);

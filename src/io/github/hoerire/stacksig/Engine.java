@@ -74,12 +74,12 @@ public final class Engine {
     // 在上一版基础上整体再收 1/3：各 padEnd 都给一个小负值，负数把「本格→右侧」的缝压窄。
     // 只用 padding，不动任何 View 的宽高，图标本身大小不变。
     private static final int PAD_NFC_END = -5;
-    private static final int PAD_CLOCK_END = -4;
+    private static final int PAD_CLOCK_END = 3;   // 正值才把闹钟往左推；负值会让它更贴信号
     private static final int PAD_ZEN_START = 0;   // 月亮 ↔ 信号（改这个只会动左侧，右侧是素材留白）
     private static final int PAD_ZEN_END = -4;
     private static final int PAD_SPEED_START = 0;
     private static final int PAD_SPEED_END = -3;   // 网速 → NFC
-    private static final int PAD_SIGNAL_START = 0;  // 月亮 → 信号（改不动，见 CONSTRAINTS）
+    private static final int PAD_SIGNAL_START = 0;  // 不要动：调它会把信号整格推走，电池就远离了
     private static final int PAD_SIGNAL_END = -4;  // 信号 → WiFi
     private static final int PAD_WIFI_END = -4;    // WiFi → 电池
 
@@ -214,7 +214,13 @@ public final class Engine {
     private static int[] gapFor(View v, int nullRank) {
         String id = entryName(v);
         if (id == null) {
-            // 无名 StatIconView，按屏幕从左到右编号：1=NFC 2=闹钟 3=月亮（闹钟和月亮之间还有一格）
+            // 无名 StatIconView：优先用 slot 名定位（图标显隐不影响），拿不到才退回可见序号
+            String slot = slotOf(v);
+            if (slot != null) {
+                if (slot.contains("nfc"))   return new int[]{GAP_INSET_PX, PAD_NFC_END};
+                if (slot.contains("alarm")) return new int[]{GAP_INSET_PX, PAD_CLOCK_END};
+                if (slot.contains("zen"))   return new int[]{PAD_ZEN_START, PAD_ZEN_END};
+            }
             switch (nullRank) {
                 case 1:  return new int[]{GAP_INSET_PX, PAD_NFC_END};
                 case 2:  return new int[]{GAP_INSET_PX, PAD_CLOCK_END};
@@ -252,6 +258,14 @@ public final class Engine {
             Method md = null;
             for (Class<?> c = v.getClass(); c != null && md == null; c = c.getSuperclass()) {
                 try { md = c.getDeclaredMethod("getSlot"); } catch (Throwable ignore) {}
+            }
+            // 多数实现把 getSlot() 声明在接口 StatusIconDisplayable 上，类里继承而来
+            if (md == null) {
+                for (Class<?> c = v.getClass(); c != null && md == null; c = c.getSuperclass()) {
+                    for (Class<?> itf : c.getInterfaces()) {
+                        try { md = itf.getMethod("getSlot"); break; } catch (Throwable ignore) {}
+                    }
+                }
             }
             if (md == null) return null;
             md.setAccessible(true);

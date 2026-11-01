@@ -780,8 +780,11 @@ public final class Engine {
             // 新主卡这一刻可能还是 0 宽（上一轮被压过）：先别收旧的，
             // 否则会出现「旧的收了、新的还没量出来」的真空帧，信号整块消失。
             if (secondRoot != null && main.getWidth() > 0) collapse(secondRoot);
-            collapseSiblings(container, primaryRoot);
+            collapseSiblings(container, primaryRoot, main);
             collapseInnerSignals(primaryRoot, main);
+            // 走「状态没变」的快速路径时也要重压一次箭头：
+            // 重建后的新实例 translationY 是 0，不压就会缩回顶部、看着像消失。
+            try { applyWifiRule(main); } catch (Throwable ignore) {}
             return;
         }
         // 重建太快会闪：网络类型在 NR/LTE 之间抖动时，250ms 内只重建一次。
@@ -815,7 +818,7 @@ public final class Engine {
             if (secondRoot != null && main.getWidth() > 0) collapse(secondRoot);
             // 兜底：这个容器里凡是还带信号的兄弟节点（副卡另一份、制式图那一份）全收掉，
             // 免得出现两个信号图标并排
-            collapseSiblings(container, primaryRoot);
+            collapseSiblings(container, primaryRoot, main);
             // 同一个 combo 内部还有第二份 mobile_signal（副卡），外层容器收不掉它
             collapseInnerSignals(primaryRoot, main);
             // 箭头占位：切卡时新 combo 是新建的，这一帧就把它的宽度按已知自然宽度钉住，
@@ -1747,6 +1750,7 @@ public final class Engine {
     private static int lastActiveSub = -1;
 
     private static boolean visWatchStarted = false;
+    private static int maintainTick = 0;
 
     /**
      * 可见性看门狗：连续快速切卡时，系统会重排两支 combo，可能一瞬间两支都被我们收着
@@ -1774,7 +1778,15 @@ public final class Engine {
                                 break;
                             }
                         }
-                        if (!anyVisible) refreshAllSitesNow();
+                        if (!anyVisible) {
+                            refreshAllSitesNow();
+                        } else if (++maintainTick % 3 == 0) {
+                            // 周期性「维护一遍」：走非强制刷新，stack() 的快路径会
+                            //   - 重新压一次箭头 translationY（重建后的新实例是 0）
+                            //   - 把同 subId 的多余 combo 收掉（连切后会挂出 74+91 两个）
+                            // 不做这些就只能等系统下一次回调，观感上就是「很久不恢复」。
+                            refreshAllSitesNow(false);
+                        }
                     }
                 } catch (Throwable ignore) {}
                 h.postDelayed(this, 300);
@@ -1907,6 +1919,20 @@ public final class Engine {
      * 不一定赶在新实例出现后跑一次，于是我们手里全是旧实例（isShown 全 false），
      * 每秒的重绘就驱动不到真正在显示的那一份，网速看起来「消失」了。
      */
+    /** 在 combo 子树里找 data_inout（Diagnostic 用） */
+    static View findDataInout(ViewGroup g, int depth) {
+        if (g == null || depth > 4) return null;
+        for (int i = 0; i < g.getChildCount(); i++) {
+            View c = g.getChildAt(i);
+            if ("data_inout".equals(entryName(c))) return c;
+            if (c instanceof ViewGroup) {
+                View r = findDataInout((ViewGroup) c, depth + 1);
+                if (r != null) return r;
+            }
+        }
+        return null;
+    }
+
     static void rescanSpeedViews() {
         try {
             ImageView m = MAIN == null ? null : MAIN.get();
@@ -2275,7 +2301,7 @@ public final class Engine {
     }
 
     /** 把容器里除主卡那份以外、还带信号的节点全部收掉 */
-    private static void collapseSiblings(ViewGroup container, View primaryRoot) {
+    private static void collapseSiblings(ViewGroup container, View primaryRoot, ImageView main) {
         try {
             // 主卡的 subId 都问不出来时不做任何收放：宁可两个都留着（随后会被下一次判定纠正），
             // 也不要在信息不全时把真正在显示的那一支收掉 —— 那就是「信号消失一段时间」。
@@ -2284,9 +2310,14 @@ public final class Engine {
                 View ch = container.getChildAt(i);
                 if (findSignal(ch) == null) continue;
                 if (ch == primaryRoot) continue;
-                // 同一张卡的另一份副本（0×0 或属于别的容器）不能收：它可能就是
-                // 屏幕上真正显示的那一份，收掉等于把主卡信号一起干掉。
-                if (subIdOfRoot(ch) == subIdOfRoot(primaryRoot)) continue;
+                // 同一张卡的副本：只保留「包含当前绘制目标 main」的那一支，
+                // 其余副本（0×0 空壳或另一个 combo）一律收掉 ——
+                // 实测连切几轮后容器里会同时挂着 74 和 91 两个 combo，空的那个就是一片空白。
+                if (subIdOfRoot(ch) == subIdOfRoot(primaryRoot)) {
+                    if (isSelfOrDescendant(ch, main)) continue;
+                    collapse(ch);
+                    continue;
+                }
                 collapse(ch);
             }
         } catch (Throwable ignore) {}

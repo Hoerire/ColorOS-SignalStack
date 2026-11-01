@@ -98,6 +98,18 @@ final class Spacing {
                 int v = c.getVisibility();
                 if (w <= 0 && v != View.VISIBLE) continue;      // 只打有意义的
                 sb.append(' ').append(n).append('=').append(w).append('/').append(v);
+                // 移动数据那一格内部：把 data_inout（上下行箭头）的可见性/宽度/位移一起打出来，
+                // 「切几轮后箭头不恢复」只有这一层能看出来。
+                if (c instanceof android.view.ViewGroup && "mobile_combo".equals(n)) {
+                    View di = Engine.findDataInout((android.view.ViewGroup) c, 0);
+                    if (di != null) {
+                        sb.append("[inout=").append(di.getWidth())
+                                .append('/').append(di.getVisibility())
+                                .append(",ty=").append(di.getTranslationY()).append(']');
+                    } else {
+                        sb.append("[inout=null]");
+                    }
+                }
             }
             Engine.dbg(sb.toString());
         } catch (Throwable ignore) {}

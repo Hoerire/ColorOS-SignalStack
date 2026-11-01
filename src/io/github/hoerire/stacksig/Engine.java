@@ -320,10 +320,7 @@ public final class Engine {
                 if (vis == View.GONE) {
                     BUSY.set(Boolean.TRUE);
                     v.setVisibility(View.INVISIBLE);
-                    try {
-                        MODULE.log(android.util.Log.INFO, "StackSig",
-                                "data_inout GONE→INVISIBLE，占位保留 " + want + "px");
-                    } catch (Throwable ignore) {}
+                    dbg("data_inout GONE→INVISIBLE，占位保留 " + want + "px");
                 }
             }
         } catch (Throwable ignore) {
@@ -472,8 +469,7 @@ public final class Engine {
                             try {
                                 BUSY.set(Boolean.TRUE);
                                 iv.setImageDrawable(ours);
-                                MODULE.log(android.util.Log.INFO, "StackSig",
-                                        "系统顶掉信号图标，已同帧还原");
+                                dbg("系统顶掉信号图标，已同帧还原");
                             } catch (Throwable ignore) {
                             } finally {
                                 BUSY.set(Boolean.FALSE);
@@ -714,10 +710,7 @@ public final class Engine {
         boolean already = main.getDrawable() instanceof VStack;
         if (already && !sig.equals(LAST.get(main))) {
             // 只有这一处会真正 setImageDrawable 重建图标；打出来方便对齐「闪一下」的时间点
-            try {
-                MODULE.log(android.util.Log.INFO, "StackSig",
-                        "重建 drawable " + LAST.get(main) + " -> " + sig + " badge=" + badgeLabel(main.getContext()));
-            } catch (Throwable ignore) {}
+            dbg("重建 drawable " + LAST.get(main) + " -> " + sig);
         }
         if (already && sig.equals(LAST.get(main))) {
             // 先还原主卡那一支（切卡后它可能上一轮被压成了 0×0 / GONE），再收副卡。
@@ -875,7 +868,7 @@ public final class Engine {
                                     ? ((View) v.getParent()).getWidth() : -1)
                             + " kids:");
                     dumpKids(sb, combo, 2);
-                    MODULE.log(android.util.Log.INFO, "StackSig", sb.toString());
+                    dbg(sb.toString());
                 } catch (Throwable ignore) {}
             }
         });
@@ -920,10 +913,7 @@ public final class Engine {
                 DISPLAY_OVERRIDE = o;
                 DISPLAY_NETTYPE = n;
                 markLabelDirty();
-                try {
-                    MODULE.log(android.util.Log.INFO, "StackSig",
-                            "制式来源 netType=" + n + " override=" + o + " sub=" + DISPLAY_SUB);
-                } catch (Throwable ignore) {}
+                dbg("制式来源 netType=" + n + " override=" + o + " sub=" + DISPLAY_SUB);
             } catch (Throwable ignore) {}
         }
     }
@@ -951,10 +941,7 @@ public final class Engine {
             DISPLAY_SUB = sub;
             // 等回调推送第一帧；这期间走反射兜底
             if (DISPLAY_OVERRIDE < 0) DISPLAY_NETTYPE = -1;
-            try {
-                MODULE.log(android.util.Log.INFO, "StackSig",
-                        "已订阅 DisplayInfoListener sub=" + sub + "（有变化就会打一行「制式来源」）");
-            } catch (Throwable ignore) {}
+            dbg("已订阅 DisplayInfoListener sub=" + sub);
         } catch (Throwable t) {
             if (!displayCbWarned) {
                 displayCbWarned = true;
@@ -991,10 +978,7 @@ public final class Engine {
             if (netType < 0 && override < 0) return null;
             if (!displayLogOnce) {
                 displayLogOnce = true;
-                try {
-                    MODULE.log(android.util.Log.INFO, "StackSig",
-                            "制式来源(反射) netType=" + netType + " override=" + override);
-                } catch (Throwable ignore) {}
+                dbg("制式来源(反射) netType=" + netType + " override=" + override);
             }
             return new int[]{netType, override};
         } catch (Throwable ignore) {
@@ -1730,10 +1714,7 @@ public final class Engine {
                             || "android.intent.action.ACTION_SUBINFO_RECORD_UPDATED".equals(action);
                     markLabelDirty();
                     WIFI_CACHED_MS = -100000L;      // 切卡后 Wi-Fi 判定也重新问一次
-                    try {
-                        MODULE.log(android.util.Log.INFO, "StackSig",
-                                "广播 " + action + " force=" + force);
-                    } catch (Throwable ignore) {}
+                    dbg("广播 " + action + " force=" + force);
                     refreshAllSitesNow(force);
                 }
             };
@@ -1745,7 +1726,7 @@ public final class Engine {
             } else {
                 app.registerReceiver(rev, f);
             }
-            MODULE.log(android.util.Log.INFO, "StackSig", "已注册切卡/服务状态广播");
+            dbg("已注册切卡/服务状态广播");
         } catch (Throwable t) {
             try {
                 MODULE.log(android.util.Log.WARN, "StackSig", "注册广播失败：" + t);
@@ -1764,10 +1745,7 @@ public final class Engine {
      *                      避免 5G↔4G 这种与信号图无关的变化把图标白闪一下）
      */
     static void refreshAllSitesNow(final boolean force) {
-        try {
-            MODULE.log(android.util.Log.INFO, "StackSig",
-                    "refreshAllSitesNow 站点=" + SITES.size() + " force=" + force);
-        } catch (Throwable ignore) {}
+        dbg("refreshAllSitesNow 站点=" + SITES.size() + " force=" + force);
         try {
             android.content.Context ctx = null;
             for (ImageView v : SITES.keySet()) {
@@ -2211,10 +2189,7 @@ public final class Engine {
     private static void revive(View v) {
         if (v == null) return;
         if (!HIDDEN.containsKey(v)) return;
-        try {
-            MODULE.log(android.util.Log.INFO, "StackSig",
-                    "revive " + entryName(v) + " w=" + v.getWidth() + " x=" + v.getX());
-        } catch (Throwable ignore) {}
+        if (DBG) dbg("revive " + entryName(v) + " w=" + v.getWidth() + " x=" + v.getX());
         HIDDEN.remove(v);
         try {
             ViewGroup.LayoutParams lp = v.getLayoutParams();
@@ -2268,10 +2243,7 @@ public final class Engine {
      */
     static void forceHidden(View v) {
         try {
-            try {
-                MODULE.log(android.util.Log.INFO, "StackSig",
-                        "collapse " + entryName(v) + " w=" + v.getWidth() + " x=" + v.getX());
-            } catch (Throwable ignore) {}
+            if (DBG) dbg("collapse " + entryName(v) + " w=" + v.getWidth() + " x=" + v.getX());
             if (v.getVisibility() != View.INVISIBLE) v.setVisibility(View.INVISIBLE);
         } catch (Throwable ignore) {}
         // 只压宽度、**不动高度**。

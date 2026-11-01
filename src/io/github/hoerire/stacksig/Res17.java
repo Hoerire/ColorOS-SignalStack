@@ -7,7 +7,6 @@ import android.graphics.drawable.Drawable;
 import android.util.DisplayMetrics;
 
 import java.lang.reflect.Method;
-import java.util.HashMap;
 
 import io.github.libxposed.api.XposedModule;
 
@@ -16,7 +15,6 @@ public final class Res17 {
 
     private static Resources res;
     private static String pkg;
-    private static final HashMap<String, Drawable> CACHE = new HashMap<>();
 
     private Res17() {}
 
@@ -51,7 +49,6 @@ public final class Res17 {
             add.invoke(am, apkPath);
             res = new Resources(am, dm, Resources.getSystem().getConfiguration());
             lastDpi = dm.densityDpi;
-            CACHE.clear();
         } catch (Throwable t) {
         }
     }

@@ -56,14 +56,6 @@ final class Spacing {
                 }
             });
             n++;
-            Method lo = sic.getDeclaredMethod("onLayout",
-                    boolean.class, int.class, int.class, int.class, int.class);
-            m.hook(lo).intercept(new XposedInterface.Hooker() {
-                @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
-                    return ch.proceed();
-                }
-            });
-            n++;
             return n;
         } catch (Throwable t) {
             try { Engine.MODULE.log(android.util.Log.WARN, "StackSig", "iconGap hook failed: " + t); }
@@ -90,7 +82,6 @@ final class Spacing {
     }
 
     private static void tightenGap(ViewGroup g) {
-        int nullRank = 0;
         for (int i = 0; i < g.getChildCount(); i++) {
             View v = g.getChildAt(i);
             if (v.getVisibility() != View.VISIBLE) continue;
@@ -99,7 +90,7 @@ final class Spacing {
             // 网速 ticker 在这里启动：tightenGap 每次布局都会跑，
             // 比挂在 stack() 里可靠（stack 只在有信号图标时才执行）。
             Speed.ensureTicker(v.getContext());
-            int[] pe = gapFor(v, nullRank++);
+            int[] pe = gapFor(v);
             if (v.getPaddingLeft() != pe[0] || v.getPaddingRight() != pe[1]) {
                 v.setPadding(pe[0], v.getPaddingTop(), pe[1], v.getPaddingBottom());
             }
@@ -120,7 +111,7 @@ final class Spacing {
      * 结果左右增减一个图标（开蓝牙、开免打扰）缝就重排 —— 因为「某格到右邻的缝」
      * 取决于右邻是谁，而右邻随时会变。统一成一个值后，图标增删只改变总宽。
      */
-    private static int[] gapFor(View v, int nullRank) {
+    private static int[] gapFor(View v) {
         // 蓝牙右边紧挨信号格左上角的制式标，需要比其他格多留 1px
         if (v.getId() == View.NO_ID) {
             String slot = Spacing.slotOf(v);

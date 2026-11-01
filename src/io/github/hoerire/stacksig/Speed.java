@@ -39,7 +39,6 @@ final class Speed {
      */
     private static volatile long OUR_SPEED_BPS = 0;
     private static long lastRx, lastTx, lastNetMs;
-    private static java.util.HashSet<String> netIfaces;
     private static boolean speedTickerStarted;
 
     /** 只在未启动时启动（Spacing 每帧都会调用） */
@@ -50,7 +49,6 @@ final class Speed {
     static void startSpeedTicker(final android.content.Context ctx) {
         if (speedTickerStarted) return;
         speedTickerStarted = true;
-        netIfaces = activeIfaces();
         sampleSpeed(true);                       // 建立基线
         final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
         h.postDelayed(new Runnable() {
@@ -62,34 +60,6 @@ final class Speed {
                 h.postDelayed(this, 1000);
             }
         }, 1000);
-    }
-
-    /**
-     * 要统计的接口：只算真正上网的那几张。
-     *
-     * 不能靠 /proc/net/route —— 里面只列了子网路由，默认路由那行不一定在，
-     * 而且虚拟接口（dummy/gre/ifb/sit…）一大堆，全算进去数值会虚高。
-     * 这里按名字白名单，并跳过隧道外的虚拟设备。
-     */
-    private static java.util.HashSet<String> activeIfaces() {
-        java.util.HashSet<String> set = new java.util.HashSet<>();
-        try {
-            String[] names = new java.io.File("/sys/class/net").list();
-            if (names == null) return set;
-            for (String n : names) {
-                if (n.equals("lo")) continue;
-                if (n.startsWith("dummy") || n.startsWith("ifb") || n.startsWith("gre")
-                        || n.startsWith("ip6") || n.startsWith("ip_vti") || n.startsWith("sit")
-                        || n.startsWith("erspan") || n.startsWith("tunl") || n.startsWith("p2p")
-                        || n.startsWith("wifi-aware") || n.startsWith("ovnet")
-                        || n.startsWith("r_rmnet")) continue;
-                if (n.startsWith("wlan") || n.startsWith("rmnet_data")
-                        || n.startsWith("eth") || n.equals("tun0")) {
-                    set.add(n);
-                }
-            }
-        } catch (Throwable ignore) {}
-        return set;
     }
 
     /**

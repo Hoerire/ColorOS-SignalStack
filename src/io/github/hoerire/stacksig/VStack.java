@@ -42,8 +42,6 @@ public final class VStack extends Drawable {
         if (tint != null) setTintList(tint);   // 初始色 = 系统此刻给这一格的 tint
     }
 
-    public void setHost(android.widget.ImageView v) { /* 保留接口 */ }
-
     /** 系统 onDarkChanged 的 darkIntensity：只在没有 tint 时用作兜底 */
     public void setFallbackDark(float d) {
         if (d < 0f) return;

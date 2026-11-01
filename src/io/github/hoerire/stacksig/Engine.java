@@ -191,7 +191,24 @@ public final class Engine {
             m.hook(target).intercept(new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
                     Object r = ch.proceed();
-                    try { alignSpeedCenter((View) ch.getThisObject()); } catch (Throwable ignore) {}
+                    View box = null;
+                    try {
+                        box = (View) ch.getThisObject();
+                        alignSpeedCenter(box);
+                    } catch (Throwable ignore) {}
+                    // 系统每次 apply 状态都是「这份实例还活着」的铁证：宽度若为 0（切卡后重建
+                    // 没重新量过），在这里钉回去最有效 —— 不依赖我们有没有登记到它。
+                    try {
+                        if (box != null && box.getWidth() == 0) {
+                            int want = Speed.cellWidth();
+                            ViewGroup.LayoutParams lp = box.getLayoutParams();
+                            if (want > 0 && lp != null && lp.width != want) {
+                                lp.width = want;
+                                box.setLayoutParams(lp);
+                            }
+                            box.requestLayout();
+                        }
+                    } catch (Throwable ignore) {}
                     return r;
                 }
             });
@@ -1807,6 +1824,32 @@ public final class Engine {
                 app.registerReceiver(rev, f);
             }
             dbg("已注册切卡/服务状态广播");
+            // 仅调试构建：用广播切默认上网卡，避免为了测试去点设置界面
+            //   am broadcast -a io.github.hoerire.stacksig.DEBUG_SET_DATA_SUB --ei sub 2
+            if (DBG) {
+                try {
+                    android.content.IntentFilter df =
+                            new android.content.IntentFilter("io.github.hoerire.stacksig.DEBUG_SET_DATA_SUB");
+                    app.registerReceiver(new android.content.BroadcastReceiver() {
+                        @Override public void onReceive(android.content.Context c, android.content.Intent i) {
+                            int want = i == null ? -1 : i.getIntExtra("sub", -1);
+                            if (want <= 0) return;
+                            try {
+                                java.lang.reflect.Method sm = android.telephony.SubscriptionManager.class
+                                        .getMethod("setDefaultDataSubId", int.class);
+                                sm.setAccessible(true);
+                                sm.invoke(android.telephony.SubscriptionManager.from(c), want);
+                                dbg("debug: setDefaultDataSubId(" + want + ") 已调用");
+                            } catch (Throwable t) {
+                                try {
+                                    MODULE.log(android.util.Log.WARN, "StackSig",
+                                            "debug: setDefaultDataSubId 失败 " + t);
+                                } catch (Throwable ignore) {}
+                            }
+                        }
+                    }, df, android.content.Context.RECEIVER_EXPORTED);
+                } catch (Throwable ignore) {}
+            }
         } catch (Throwable t) {
             try {
                 MODULE.log(android.util.Log.WARN, "StackSig", "注册广播失败：" + t);
@@ -1856,6 +1899,37 @@ public final class Engine {
     }
 
     // ---------- 视图工具 ----------
+
+    /**
+     * 从状态栏根节点重新扫一遍 network_speed 视图并登记。
+     *
+     * 切卡/重建状态栏后，系统会新建一份网速 View；Spacing 那条登记链路（updateStates hook）
+     * 不一定赶在新实例出现后跑一次，于是我们手里全是旧实例（isShown 全 false），
+     * 每秒的重绘就驱动不到真正在显示的那一份，网速看起来「消失」了。
+     */
+    static void rescanSpeedViews() {
+        try {
+            ImageView m = MAIN == null ? null : MAIN.get();
+            if (m == null) return;
+            // 直接扫整棵窗口：切卡后状态栏里会出现第二份 network_speed，
+            // 从 MAIN 往上找某个「宽≈屏宽」的祖先不一定能覆盖到全部实例。
+            View root = m.getRootView();
+            if (root == null) root = m;
+            collectSpeedViews(root, 0);
+        } catch (Throwable ignore) {}
+    }
+
+    private static void collectSpeedViews(View v, int depth) {
+        if (v == null || depth > 12) return;
+        try {
+            String n = entryName(v);
+            if (n != null && n.toLowerCase().contains("network_speed")) Speed.rememberSpeedView(v);
+        } catch (Throwable ignore) {}
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) collectSpeedViews(g.getChildAt(i), depth + 1);
+        }
+    }
 
     static String entryName(View v) {
         try {

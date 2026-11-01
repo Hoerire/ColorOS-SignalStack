@@ -120,6 +120,11 @@ final class Speed {
         lastRx = b[0]; lastTx = b[1]; lastNetMs = now;
     }
 
+    /** 见过的网速格最大宽度：宽度被系统算成 0 时用它钉回去 */
+    private static volatile int SPEED_CELL_W = 0;
+
+    static int cellWidth() { return SPEED_CELL_W; }
+
     /** 已捕获的网速 View（主状态栏 / 下拉栏各一份） */
     private static final java.util.WeakHashMap<Object, Boolean> SPEED_VIEWS =
             new java.util.WeakHashMap<>();
@@ -128,12 +133,54 @@ final class Speed {
     static void rememberSpeedView(View v) {
         String id = Engine.entryName(v);
         if (id != null && id.toLowerCase().contains("network_speed")) {
+            boolean isNew = !SPEED_VIEWS.containsKey(v);
             SPEED_VIEWS.put(v, Boolean.TRUE);
+            if (isNew) Engine.dbg("speed register h" + Integer.toHexString(System.identityHashCode(v))
+                    + " shown=" + v.isShown() + " w=" + v.getWidth());
         }
+    }
+
+    /** 清掉已经 detach 的旧实例，避免表越滚越大（实测切几次能从 4 涨到 20） */
+    private static void pruneSpeedViews() {
+        try {
+            java.util.Iterator<Object> it = SPEED_VIEWS.keySet().iterator();
+            while (it.hasNext()) {
+                Object k = it.next();
+                if (!(k instanceof View) || !((View) k).isAttachedToWindow()) it.remove();
+            }
+        } catch (Throwable ignore) {}
+    }
+
+    private static int countShown() {
+        int n = 0;
+        for (Object key : SPEED_VIEWS.keySet()) {
+            if (key instanceof View && ((View) key).isShown()) n++;
+        }
+        return n;
     }
 
     /** 每秒把每份网速 View 的当前状态重新 apply 一次，触发重绘 */
     private static void repaintSpeedViews() {
+        // 每秒都重新扫一遍窗口里的网速实例：切卡后系统会新建一份，
+        // 只依赖“发现没有可见实例才扫”会漏掉「有可见实例但不是我们驱动的那份」。
+        Engine.rescanSpeedViews();
+        pruneSpeedViews();
+        int visible = countShown();
+        int applied = applyAll();
+        // 一个可见的都没有 → 手里的都是旧实例：立刻重扫登记，并**在同一轮**把新实例补上，
+        // 否则要等下一秒才亮，看起来就是「网速消失一会儿」。
+        if (visible == 0) {
+            Engine.rescanSpeedViews();
+            applied += applyAll();
+            visible = countShown();
+        }
+        Engine.dbg("speed repaint views=" + SPEED_VIEWS.size() + " shown=" + visible
+                + " applied=" + applied + " bps=" + OUR_SPEED_BPS + " live=" + liveSpeedText());
+    }
+
+    /** 对表里所有可见实例 apply 一次当前状态，返回成功次数 */
+    private static int applyAll() {
+        int applied = 0;
         for (Object key : SPEED_VIEWS.keySet()) {
             if (!(key instanceof View)) continue;
             View v = (View) key;
@@ -155,7 +202,55 @@ final class Speed {
                 if (ap == null) continue;
                 ap.setAccessible(true);
                 ap.invoke(v, state);
+                applied++;
+                // 文本有了但宽度是 0：这一格被系统重新挂上去后没重新量过（实测 w=0）。
+                // 先记下见过的最大宽度，然后直接把宽度钉成它 —— 光 requestLayout 不够，
+                // 有些路径不会重走 measure，宽度就一直停在 0，屏幕上就是「网速消失」。
+                int wv = v.getWidth();
+                if (wv > SPEED_CELL_W) SPEED_CELL_W = wv;
+                if (wv == 0 && SPEED_CELL_W > 0) {
+                    // 宽度为 0：改 LayoutParams 在多数情况下能把这一格顶回去；
+                    // 少数情况下父容器宽度也是 0，只能等系统下一次刷新（≤4s）。
+                    android.view.ViewGroup.LayoutParams lp = v.getLayoutParams();
+                    if (lp != null && lp.width != SPEED_CELL_W) {
+                        lp.width = SPEED_CELL_W;
+                        v.setLayoutParams(lp);
+                        Engine.dbg("speed 宽度归零，钉回 " + SPEED_CELL_W + "px");
+                    }
+                }
             } catch (Throwable ignore) {}
+        }
+        return applied;
+    }
+
+    private static void logRepaint(int total, int visible, int applied) {
+        Engine.dbg("speed repaint views=" + total + " shown=" + visible + " applied=" + applied
+                + " bps=" + OUR_SPEED_BPS + " live=" + liveSpeedText());
+    }
+
+    /** 诊断：把「当前挂着的」网速 view 的宽度/文本/是否在我们表里打出来 */
+    private static String liveSpeedText() {
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (Object key : SPEED_VIEWS.keySet()) {
+                if (!(key instanceof View)) continue;
+                View v = (View) key;
+                if (!v.isShown()) continue;
+                sb.append("[w=").append(v.getWidth()).append(" h").append(Integer.toHexString(System.identityHashCode(v)));
+                if (v instanceof android.view.ViewGroup) {
+                    android.view.ViewGroup g = (android.view.ViewGroup) v;
+                    for (int i = 0; i < g.getChildCount(); i++) {
+                        View c = g.getChildAt(i);
+                        if (c instanceof android.widget.TextView) {
+                            sb.append(" '").append(((android.widget.TextView) c).getText()).append('\'');
+                        }
+                    }
+                }
+                sb.append(']');
+            }
+            return sb.length() == 0 ? "(none-shown)" : sb.toString();
+        } catch (Throwable t) {
+            return "err";
         }
     }
 
@@ -169,6 +264,7 @@ final class Speed {
                 @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
                     Object r = ch.proceed();
                     try {
+                        Engine.dbg("speed getSpeedText orig=" + r + (r == null ? "" : " (" + r.getClass().getSimpleName() + ")"));
                         long orig = (r instanceof Long) ? (Long) r : 0L;
                         // 原厂要隐藏时给负值，这种不要覆盖
                         if (orig < 0) return r;

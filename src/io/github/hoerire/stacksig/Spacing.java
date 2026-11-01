@@ -81,7 +81,30 @@ final class Spacing {
         return false;
     }
 
+    private static long lastDumpMs = 0;
+
+    /** 诊断：把 StatusIconContainer 的每个子 view 名字/可见性/宽度打出来 */
+    private static void dumpBar(ViewGroup g) {
+        if (!Engine.DBG) return;
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastDumpMs < 2000) return;
+        lastDumpMs = now;
+        try {
+            StringBuilder sb = new StringBuilder("bar:");
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View c = g.getChildAt(i);
+                String n = Engine.entryName(c);
+                int w = c.getWidth();
+                int v = c.getVisibility();
+                if (w <= 0 && v != View.VISIBLE) continue;      // 只打有意义的
+                sb.append(' ').append(n).append('=').append(w).append('/').append(v);
+            }
+            Engine.dbg(sb.toString());
+        } catch (Throwable ignore) {}
+    }
+
     private static void tightenGap(ViewGroup g) {
+        dumpBar(g);
         for (int i = 0; i < g.getChildCount(); i++) {
             View v = g.getChildAt(i);
             if (v.getVisibility() != View.VISIBLE) continue;

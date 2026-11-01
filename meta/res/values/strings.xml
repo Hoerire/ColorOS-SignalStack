@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">ColorOS 堆叠信号</string>
-    <string name="app_desc">把 ColorOS 17 的双排（堆叠）信号样式带到 ColorOS 15 / 16：主卡大信号与副卡小信号叠在同一槽位，左上角显示 2G / 3G / 4G / 5G 制式标。颜色交由系统绘制，与电池、网速完全一致。</string>
+    <string name="app_name">状态栏美化</string>
+    <string name="app_desc">把 ColorOS 17 的双排信号搬到 ColorOS 15 / 16 状态栏。</string>
 </resources>

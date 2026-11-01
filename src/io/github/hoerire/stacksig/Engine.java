@@ -303,25 +303,38 @@ public final class Engine {
         String n = entryName(v);
         if (!"data_inout".equals(n)) return;
         try {
-            // 可见时记录自然宽度（同一台机器上是固定的，91 px @560dpi）
-            int w = v.getWidth();
-            if (w > DATA_INOUT_W) DATA_INOUT_W = w;
-            if (isWifiConnected(v.getContext())) return;
             int vis = v.getVisibility();
-            if (vis == View.GONE || vis == View.INVISIBLE) {
-                // 隐藏态：宽度按已知自然宽度钉死。切卡时新 combo 是新建的，
-                // 这一刻箭头还没量出宽度，不钉的话它先按 70 铺一帧，数据恢复后跳回 91 —— 整排 +21px。
-                int want = DATA_INOUT_W;
-                ViewGroup.LayoutParams lp = v.getLayoutParams();
-                if (want > 0 && lp != null && lp.width != want) {
-                    lp.width = want;
+            int w = v.getWidth();
+            // 可见时记录自然宽度（同一台机器固定，91 px @560dpi）
+            if (vis == View.VISIBLE && w > DATA_INOUT_W) DATA_INOUT_W = w;
+
+            ViewGroup.LayoutParams lp = v.getLayoutParams();
+            boolean pinned = lp != null && DATA_INOUT_W > 0 && lp.width == DATA_INOUT_W;
+            boolean wifi = isWifiConnected(v.getContext());
+
+            // 只有「没连 Wi-Fi 且箭头被藏起来」时才需要保留占位。
+            // 其余情况必须把宽度放开：Wi-Fi 下箭头本来不画，钉子留着就变成
+            // 闹钟和信号之间那块空白（实测：连 Wi-Fi 切数据卡后出现，关 Wi-Fi 自己好）。
+            if (wifi || vis == View.VISIBLE) {
+                if (pinned) {
+                    lp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
                     v.setLayoutParams(lp);
+                    dbg("data_inout 放开占位（wifi=" + wifi + " vis=" + vis + "）");
                 }
-                if (vis == View.GONE) {
-                    BUSY.set(Boolean.TRUE);
-                    v.setVisibility(View.INVISIBLE);
-                    dbg("data_inout GONE→INVISIBLE，占位保留 " + want + "px");
-                }
+                return;
+            }
+
+            // 隐藏态 + 没连 Wi-Fi：按已知自然宽度钉死。切卡时新 combo 是新建的，
+            // 这一刻箭头还没量出宽度，不钉的话它先按窄的铺一帧、数据恢复后再跳宽 —— 整排 +21px。
+            int want = DATA_INOUT_W;
+            if (want > 0 && lp != null && lp.width != want) {
+                lp.width = want;
+                v.setLayoutParams(lp);
+            }
+            if (vis == View.GONE) {
+                BUSY.set(Boolean.TRUE);
+                v.setVisibility(View.INVISIBLE);
+                dbg("data_inout GONE→INVISIBLE，占位保留 " + want + "px");
             }
         } catch (Throwable ignore) {
         } finally {
@@ -586,6 +599,8 @@ public final class Engine {
             if (findSignal(ch) == null) continue;
             // 只放开「当前上网卡」那一支。放开别的卡等于把它重新显示出来，
             // 状态栏会并排出现两个信号图标。
+            // 例外：activeSub 取不到（切卡瞬间会短暂返回 -1）时不要过滤 ——
+            // 否则该放的也被跳过，两支都被压着，信号就整块消失，只能等兜底 ticker。
             if (activeSub > 0 && subIdOfRoot(ch) != activeSub) continue;
             if (HIDDEN.containsKey(ch)) revive(ch);
         }
@@ -602,9 +617,16 @@ public final class Engine {
         //    要等下一帧 layout 才有宽高，此刻看尺寸会把它误判成空壳。
         //    subId 是硬判据，尺寸只用来在同 subId 的多份副本之间去重。
         if (activeSub > 0) {
+            View fallback = null;
             for (View c : cands) {
-                if (subIdOfRoot(c) == activeSub) { primaryRoot = c; break; }
+                if (subIdOfRoot(c) != activeSub) continue;
+                if (fallback == null) fallback = c;
+                // 同一张卡在这个容器里会有两份实例：一份真正在显示（91×70），一份 0×0 空壳。
+                // 只按 subId 取第一个会挑中空壳 —— 图标画进看不见的实例里，
+                // 同时把真正显示的那一支当副卡收掉，屏幕上信号整块消失且不会自愈。
+                if (c.getVisibility() == View.VISIBLE && c.getWidth() > 0) { fallback = c; break; }
             }
+            primaryRoot = fallback;
         }
         // 2) 退而求其次：有尺寸的里面挑最像「当前这份」的那一支
         if (primaryRoot == null) {
@@ -619,6 +641,21 @@ public final class Engine {
         }
         if (primaryRoot == null) primaryRoot = cands.get(0);
 
+        // 兜底：按 subId 选中的那一份如果是 0×0 空壳（切卡时系统还没把**可见实例**
+        // 的 subId 改过来，常见：容器里只有 sub=新卡 的空壳 + sub=旧卡 的可见实例），
+        // 就先拿正在显示的那一份顶着：宁可短暂显示旧卡，也不能把唯一可见的收掉 ——
+        // 收掉之后没有任何可见信号，看门狗会反复重跑同一套判定，永远回不来。
+        if (primaryRoot.getWidth() == 0) {
+            for (View c : cands) {
+                if (c == primaryRoot) continue;
+                if (c.getVisibility() == View.VISIBLE && c.getWidth() > 0) {
+                    dbg("primary 空壳，先用可见的那份顶着 sub=" + subIdOfRoot(c));
+                    primaryRoot = c;
+                    break;
+                }
+            }
+        }
+
         // 副卡 = 另一张卡的那一份。同一张卡的另一份副本不算副卡（它要么是 0×0
         // 的空壳、要么属于别的容器），绝不能拿来当「第二张卡」参与堆叠。
         View secondRoot = null;
@@ -628,6 +665,7 @@ public final class Engine {
             int s = subIdOfRoot(c);
             if (s == pSub) continue;   // 同一张卡的副本，跳过
             if (s <= 0) continue;      // subId 未知，不能当第二张卡
+            if (pSub <= 0) continue;   // 主卡的 subId 也没问出来：这一轮不做主副卡判定
             secondRoot = c;
             break;
         }
@@ -667,6 +705,12 @@ public final class Engine {
                 if (fresh) attachBadgeWhenMeasured(g, main.getContext());
             }
         }
+
+        dbg("stack act=" + activeSub + " cands=" + cands.size()
+                + " primary=" + (primaryRoot == null ? -1 : subIdOfRoot(primaryRoot))
+                + " second=" + (secondRoot == null ? -1 : subIdOfRoot(secondRoot))
+                + " hidden=" + HIDDEN.size()
+                + " mainW=" + main.getWidth() + " mainVis=" + main.getVisibility());
 
         Drawable a = ORIG.get(main);
         if (a == null) a = main.getDrawable();
@@ -716,7 +760,9 @@ public final class Engine {
             // 先还原主卡那一支（切卡后它可能上一轮被压成了 0×0 / GONE），再收副卡。
             // 顺序不能反：先收后还原会让还原把副卡一起放开。
             reviveChain(primaryRoot, primaryRoot, 0);
-            if (secondRoot != null) collapse(secondRoot);
+            // 新主卡这一刻可能还是 0 宽（上一轮被压过）：先别收旧的，
+            // 否则会出现「旧的收了、新的还没量出来」的真空帧，信号整块消失。
+            if (secondRoot != null && main.getWidth() > 0) collapse(secondRoot);
             collapseSiblings(container, primaryRoot);
             collapseInnerSignals(primaryRoot, main);
             return;
@@ -749,7 +795,7 @@ public final class Engine {
             main.setImageDrawable(composed);
             // 还原主卡那一支：切数据卡后它可能还带着上一轮的 0×0 / GONE
             reviveChain(primaryRoot, primaryRoot, 0);
-            if (secondRoot != null) collapse(secondRoot);
+            if (secondRoot != null && main.getWidth() > 0) collapse(secondRoot);
             // 兜底：这个容器里凡是还带信号的兄弟节点（副卡另一份、制式图那一份）全收掉，
             // 免得出现两个信号图标并排
             collapseSiblings(container, primaryRoot);
@@ -1641,16 +1687,15 @@ public final class Engine {
         tickerStarted = true;
         // 事件驱动优先：切卡广播一到就重算，不等轮询
         try { startSlotReceiver(any.getContext()); } catch (Throwable ignore) {}
+        startVisibilityWatch();
         final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
         h.postDelayed(new Runnable() {
             @Override public void run() {
                 try {
-                    boolean anyVisible = false;
                     for (ImageView v : SITES.keySet()) {
                         if (v == null) continue;
-                        boolean live = v.isAttachedToWindow() && v.getVisibility() == View.VISIBLE;
-                        if (live) anyVisible = true;
                         // 只有挂在窗口上、真在显示的站点才重绘；detach 的直接跳过
+                        boolean live = v.isAttachedToWindow() && v.getVisibility() == View.VISIBLE;
                         if (!live) continue;
                         Drawable d = v.getDrawable();
                         if (d != null) d.invalidateSelf();
@@ -1673,7 +1718,6 @@ public final class Engine {
                         lastActiveSub = act;
                         refreshAllSitesNow();
                     }
-                    if (!anyVisible) refreshAllSitesNow();
                 } catch (Throwable ignore) {}
                 // 主通道是 DisplayInfoCallback / NetworkCallback / 系统广播，这里只是兜底。
                 // 1500ms 足够（真有变化都是推过来的），也把常驻唤醒压到最低。
@@ -1684,6 +1728,42 @@ public final class Engine {
     private static java.lang.ref.WeakReference<ImageView> MAIN;
     /** 上一次看到的 activeDataSubId；变化即视为「切数据卡」，强制所有站点重算 */
     private static int lastActiveSub = -1;
+
+    private static boolean visWatchStarted = false;
+
+    /**
+     * 可见性看门狗：连续快速切卡时，系统会重排两支 combo，可能一瞬间两支都被我们收着
+     * （activeSub 还没跟上），表现就是「信号短暂消失一段」。这个检查只做一件事：
+     * 有没有一个可见的信号 view —— 没有就重跑判定把它捞回来。
+     *
+     * 300ms 一轮、只读 View 属性、不碰 binder，成本可以忽略；比挂在 1500ms 的兜底 ticker 快 5 倍。
+     */
+    private static void startVisibilityWatch() {
+        if (visWatchStarted) return;
+        visWatchStarted = true;
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        h.postDelayed(new Runnable() {
+            @Override public void run() {
+                try {
+                    // 还没抓到任何站点（进程刚起）时什么都不做，免得空转
+                    if (!SITES.isEmpty()) {
+                        boolean anyVisible = false;
+                        for (ImageView v : SITES.keySet()) {
+                            // 必须用 isShown()：被 forceHidden 收起来的是**祖先 combo**
+                            // （INVISIBLE + 宽度 0），子 view 自己的 visibility 和宽度都还是老值，
+                            // 只判 VISIBLE 会误认为「还有信号在显示」，看门狗就不救了。
+                            if (v != null && v.isShown() && v.getWidth() > 0) {
+                                anyVisible = true;
+                                break;
+                            }
+                        }
+                        if (!anyVisible) refreshAllSitesNow();
+                    }
+                } catch (Throwable ignore) {}
+                h.postDelayed(this, 300);
+            }
+        }, 300);
+    }
 
     private static boolean slotReceiverStarted = false;
 
@@ -2123,6 +2203,9 @@ public final class Engine {
     /** 把容器里除主卡那份以外、还带信号的节点全部收掉 */
     private static void collapseSiblings(ViewGroup container, View primaryRoot) {
         try {
+            // 主卡的 subId 都问不出来时不做任何收放：宁可两个都留着（随后会被下一次判定纠正），
+            // 也不要在信息不全时把真正在显示的那一支收掉 —— 那就是「信号消失一段时间」。
+            if (subIdOfRoot(primaryRoot) <= 0) return;
             for (int i = 0; i < container.getChildCount(); i++) {
                 View ch = container.getChildAt(i);
                 if (findSignal(ch) == null) continue;
@@ -2186,6 +2269,18 @@ public final class Engine {
      * 只要主副卡角色一换，被压成 0×0 的就不再是副卡 —— 结果是两支都被压掉，
      * 状态栏上信号整个消失。每次判完主卡都要把不该藏的还原回来。
      */
+    /** 把被压成 0 宽的节点还原成 wrap_content（不动高度） */
+    private static void unzero(View v) {
+        try {
+            ViewGroup.LayoutParams lp = v.getLayoutParams();
+            if (lp != null && lp.width == 0) {
+                lp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+                v.setLayoutParams(lp);
+            }
+            if (isSignalNode(v) && v.getVisibility() != View.VISIBLE) v.setVisibility(View.VISIBLE);
+        } catch (Throwable ignore) {}
+    }
+
     private static void revive(View v) {
         if (v == null) return;
         if (!HIDDEN.containsKey(v)) return;
@@ -2224,7 +2319,13 @@ public final class Engine {
             cur = p instanceof View ? (View) p : null;
         }
         if (!onChain) return;
-        if (HIDDEN.containsKey(node)) revive(node);
+        if (HIDDEN.containsKey(node)) {
+            revive(node);
+        } else if (node == root || isSignalNode(node)) {
+            // 不在 HIDDEN 里、宽度却是 0：说明曾被压过又被别的路径摘出了 HIDDEN。
+            // 不还原它就永远量不出宽度 —— 这一支等于永久空白。
+            unzero(node);
+        }
         if (node instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) node;
             for (int i = 0; i < g.getChildCount(); i++) reviveChain(g.getChildAt(i), root, depth + 1);
@@ -2498,6 +2599,12 @@ public final class Engine {
      * 靠 2.5 秒 ticker 会明显慢一拍，这里直接推一次。
      */
     private static void onNetChanged(android.content.Context ctx) {
+        // Wi-Fi 上下线会改变「箭头该不该占位」：立刻把已知 combo 里的 data_inout 过一遍
+        try {
+            for (ViewGroup g : BADGE_COMBOS.keySet()) {
+                if (g != null) pinDataInoutIn(g);
+            }
+        } catch (Throwable ignore) {}
         // Wi-Fi 上下线：缓存立刻失效，由下一个 ticker 周期（最多 2.5s）刷。
         // 这里**不**直接 push：NetworkCallback 的能力变化可能很频繁（信号强度抖动），
         // 每次都立刻重算就等于把「事件风暴」搬进 UI 线程。

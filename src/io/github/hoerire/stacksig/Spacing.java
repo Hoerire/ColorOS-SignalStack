@@ -65,7 +65,10 @@ final class Spacing {
     private static long lastDumpMs = 0;
     private static long lastBadMs = 0;
 
+    private static long lastInoutCheckMs = 0;
+
     private static void onLayout(ViewGroup g) {
+        checkInout(g);
         dumpBar(g);
         for (int i = 0; i < g.getChildCount(); i++) {
             View v = g.getChildAt(i);
@@ -76,6 +79,34 @@ final class Spacing {
             // 比挂在 stack() 里可靠（stack 只在有信号图标时才执行）。
             Speed.ensureTicker(v.getContext());
         }
+    }
+
+    /**
+     * 按需补钉：没连 Wi-Fi、但 mobile_combo 的宽度小于「inout 天然宽度」时补一次。
+     *
+     * combo 一塌，信号柱就左移、左上角的制式标会压上去。系统在关蓝牙、图标增删、
+     * 控制中心收放等时机都可能让 combo 重新测量，那些时刻没有广播能通知我们。
+     * 500ms 查一次，命中后交给 Engine.repinInout()（内部 1 秒去抖）。
+     *
+     * 注意：这里**只看 combo 宽度**，不看 inout 的可见性 —— inout 该 GONE 还是 VISIBLE
+     * 完全由系统决定，我们不再插手（插手会打乱系统状态机，箭头会一直不显示）。
+     */
+    private static void checkInout(ViewGroup g) {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastInoutCheckMs < 500) return;
+        lastInoutCheckMs = now;
+        try {
+            if (Engine.wifiNow()) return;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View c = g.getChildAt(i);
+                if (!(c instanceof ViewGroup)) continue;
+                if (!"mobile_combo".equals(Engine.entryName(c))) continue;
+                // 每 500ms 让 Engine 复检一次：combo 宽度 + 箭头显隐是否与流量一致
+                // （它内部 1 秒去抖，所有改动幂等，状态对了就不动）
+                Engine.repinInout();
+                return;
+            }
+        } catch (Throwable ignore) {}
     }
 
     /**

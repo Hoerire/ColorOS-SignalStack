@@ -47,6 +47,9 @@ public final class Engine {
     // 每 3 秒往 LSPosed 日志打一行 BADGE（label / wifi / 每个 combo 的 tv 状态），
     // 另有 stack / collapse / speed / bar: 等明细。发行版保持 false。
     static final boolean DBG = false;
+
+    /** 临时：强制制式标显示 5GA，用于预览 A 缩小的效果（本地无 5GA 覆盖）。看完改回 false。 */
+    static final boolean PREVIEW_5GA = false;
     private static long lastDbgMs = 0;
 
     static void dbg(String msg) {
@@ -593,8 +596,8 @@ public final class Engine {
                         + g.getHeight() + " kids=" + g.getChildCount());
                 BADGE_COMBOS.put(g, Boolean.TRUE);
                 if (fresh) watchComboWidth(g);
-                // 钉住 data_inout 的占位宽度：combo 宽度若塌到 70，左上角的制式标会压到柱子上
-                pinInoutWidth(g);
+                // 维持 combo 最小宽度：它若塌到 70，左上角的制式标会压到柱子上
+                maintainComboWidth(g);
                 // 新容器（状态栏重建／下拉栏首次出现）先填一次当前值，
                 // 否则要等到制式下次变化才有文字。已登记过的完全不碰，避免两套写入口。
                 if (fresh) attachBadgeWhenMeasured(g, main.getContext());
@@ -737,7 +740,12 @@ public final class Engine {
      * 只调这一个数就能左右移动制式标，箭头位置完全不动 —— 单向调整才不会两边拉扯。
      * 560dpi 下 1dp = 3.5px。
      */
-    private static final float BADGE_LEFT_DP = 2.05f;
+    /**
+     * 制式标的左偏移（dp）。
+     * 2026-11-02 从 2.05 收到 0.05：5GA 缩了 A 之后仍和信号柱贴着，整体再左移 2dp。
+     * combo 的 clipChildren 已经是 false，超出左缘也不会被裁。
+     */
+    private static final float BADGE_LEFT_DP = 0.05f;
 
     private static final java.util.WeakHashMap<ViewGroup, android.widget.TextView> BADGE_VIEWS =
             new java.util.WeakHashMap<>();
@@ -762,45 +770,102 @@ public final class Engine {
     }
 
     /**
-     * data_inout 那一格的天然宽度（560dpi 实测 91px），只用来**钉住占位**。
+     * data_inout 那一格的天然宽度（560dpi 实测 91px）。
      *
-     * 为什么需要它：mobile_combo 的宽度取子 view 的最大值，而 data_inout（91px）
-     * 比 mobile_signal（67px）宽。系统在数据断开时把 inout 设成 GONE，combo 立刻
-     * 从 91 塌到 70 —— 信号柱左移，左上角的制式标（leftMargin 1.15dp 固定）就压到
-     * 柱子上去了（2026-11-02 用户实测）。
+     * mobile_combo 的宽度 = 子 view 的最大宽度：inout 91px、mobile_signal 67px。
+     * 系统在数据断开时把 inout 设成 GONE —— GONE 不参与 measure，combo 立刻塌到 70，
+     * 信号柱左移、左上角制式标（leftMargin 固定）就压到柱子上。
      *
-     * 注意：**只改 lp.width，不改可见性**。可见性交给系统 —— 早先那版会把 GONE 改成
-     * INVISIBLE，结果箭头被我们卡住、切卡后迟迟不恢复（1.1.3 因此整段删掉，
-     * 却导致了「制式标压柱子」这个新问题）。名字里带 Pin 但只 Pin 宽度。
+     * **修法：给 combo 设最小宽度，不碰 inout 的可见性。**
+     *   - 前两版都试过直接动 inout：改 lp.width（GONE 不 measure，无效）、
+     *     改 GONE→INVISIBLE（占位有效，但打乱了系统对它的状态管理，箭头再也不被设回
+     *     VISIBLE，表现为「箭头一直不显示」）。
+     *   - minWidth 只约束 combo 的测量结果，inout 的 GONE/VISIBLE 仍然完全由系统决定，
+     *     箭头该显示就显示。
+     *
+     * 连着 WiFi 时放开，否则信号格左边会多出一块空白。
      */
     private static volatile int DATA_INOUT_W = 0;
+    private static long lastRepinMs = 0;
 
-    /** 递归找到 combo 里的 data_inout，把宽度钉成天然宽度（不动可见性） */
-    private static void pinInoutWidth(View v) {
-        if (v == null) return;
+    /** 供 Spacing 用：inout 的期望宽度（px） */
+    static int inoutWidthPx() {
         try {
-            if ("data_inout".equals(entryName(v))) {
-                int w = v.getWidth();
-                if (v.getVisibility() == View.VISIBLE && w > DATA_INOUT_W) DATA_INOUT_W = w;
-                int want = DATA_INOUT_W;
-                if (want <= 0) {
-                    // 还没见过它可见的样子（例如刚重启就处在无数据活动状态）：
-                    // 26dp 是 560dpi 下实测 91px 的等价 dp，按 density 换算兜底。
-                    want = Math.round(26f * v.getResources().getDisplayMetrics().density);
-                }
-                ViewGroup.LayoutParams lp = v.getLayoutParams();
-                if (lp != null && lp.width != want) {
-                    lp.width = want;
-                    v.setLayoutParams(lp);
-                }
-                return;
+            return DATA_INOUT_W > 0 ? DATA_INOUT_W
+                    : Math.round(26f * android.content.res.Resources.getSystem()
+                            .getDisplayMetrics().density);
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    private static int inoutWidthPx(View any) {
+        if (DATA_INOUT_W > 0) return DATA_INOUT_W;
+        try {
+            return Math.round(26f * any.getResources().getDisplayMetrics().density);
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /**
+     * 维持 mobile_combo 的最小宽度：非 WiFi 时至少 inout 那么宽，WiFi 下放开。
+     *
+     * 顺带记录 inout 的天然宽度（只有它可见时才量得到）。
+     */
+    private static void maintainComboWidth(ViewGroup combo) {
+        if (combo == null) return;
+        try {
+            View inout = findDataInout(combo, 0);
+            if (inout != null) {
+                int w = inout.getWidth();
+                if (inout.getVisibility() == View.VISIBLE && w > DATA_INOUT_W) DATA_INOUT_W = w;
             }
-            if (v instanceof ViewGroup) {
-                ViewGroup g = (ViewGroup) v;
-                for (int i = 0; i < g.getChildCount(); i++) pinInoutWidth(g.getChildAt(i));
+            boolean wifi = isWifiConnected(combo.getContext());
+            int want = wifi ? 0 : inoutWidthPx(combo);
+            if (combo.getMinimumWidth() != want) combo.setMinimumWidth(want);
+
+            if (inout == null || wifi) return;
+            int want2 = inoutWidthPx(combo);
+            ViewGroup.LayoutParams lp = inout.getLayoutParams();
+
+            // 有流量 → 箭头显示；没流量 → INVISIBLE 占位（不绘制，但撑住 combo，
+            // 信号柱不左移、制式标不会压上去）。
+            // 不再依赖系统那个被我们改过的可见性状态机 —— 早先两版都在这上面翻车。
+            boolean active = Speed.currentBps() > 0L;
+            BUSY.set(Boolean.TRUE);
+            try {
+                if (active) {
+                    if (inout.getVisibility() != View.VISIBLE) inout.setVisibility(View.VISIBLE);
+                } else if (inout.getVisibility() == View.GONE) {
+                    inout.setVisibility(View.INVISIBLE);
+                }
+            } finally {
+                BUSY.set(Boolean.FALSE);
+            }
+            if (lp != null && lp.width != want2) {
+                lp.width = want2;
+                inout.setLayoutParams(lp);
             }
         } catch (Throwable ignore) {}
     }
+
+    /** 对所有已知 combo 补一次最小宽度（1 秒去抖） */
+    static void repinInout() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (now - lastRepinMs < 1000) return;
+        lastRepinMs = now;
+        try {
+            for (ViewGroup g : new java.util.ArrayList<>(BADGE_COMBOS.keySet())) {
+                if (g != null) maintainComboWidth(g);
+            }
+        } catch (Throwable ignore) {}
+    }
+
+    /** Wi-Fi 状态稳定后补一次（刚断时判据可能还报「连着」） */
+    private static final Runnable REPIN_LATER = new Runnable() {
+        @Override public void run() { repinInout(); }
+    };
 
     /**
      * 宽度看门狗：这一格宽度一变，右侧整排就会横移（用户看到的「顶一下」）。
@@ -1094,6 +1159,7 @@ public final class Engine {
 
     static String badgeLabel(android.content.Context ctx) {
         if (ctx == null) return "";
+        if (PREVIEW_5GA) return "5GA";
         // 没脏就复用上次结果；但最多复用 5 秒 —— 事件（NetworkCallback / DisplayInfo /
         // 切卡广播）只要丢一次，脏标记就再也不会被置起来，制式标会永久停在错误值上，
         // 只能重启 SystemUI。这条 TTL 是最后一道自愈，稳态开销 ≈ 24 次 binder/分钟。
@@ -1408,10 +1474,34 @@ public final class Engine {
                 // 布局可能已经变了（单/双卡切换、图标增减、WiFi 图标出现），
             // 挂一次 layout 监听：几何一变就重新校准左边距。
 
-            if (!text.contentEquals(tv.getText())) tv.setText(text);
+            CharSequence shown = badgeSpan(text);
+            if (!android.text.TextUtils.equals(shown, tv.getText())) tv.setText(shown);
             }
             syncBadgeColor(tv, combo);
         } catch (Throwable ignore) {}
+    }
+
+    /**
+     * 制式标的字形处理：5GA 里的「A」缩到 G 的一半。
+     *
+     * 为什么要缩：5GA 比 5G 宽 1 个字符，TextView 是 wrap_content，
+     * 左缘又固定贴着信号格左上角，多出来的宽度会顶到信号柱上（2026-11-02 用户实测）。
+     * 只缩字形不改字号，整体高度和基线都不动，视觉上仍是「5G + 小 A」。
+     */
+    private static CharSequence badgeSpan(String text) {
+        try {
+            if (text == null || text.length() < 2 || !text.endsWith("A")) return text;
+            android.text.SpannableString ss = new android.text.SpannableString(text);
+            int n = text.length();
+            ss.setSpan(new android.text.style.RelativeSizeSpan(0.7f), n - 1, n,
+                    android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            // 父级已经是 BOLD，但缩小后笔画显得细，这里显式再标一次
+            ss.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD),
+                    n - 1, n, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            return ss;
+        } catch (Throwable t) {
+            return text;
+        }
     }
 
     private static void applyWifiRule(ImageView signal) {
@@ -1493,6 +1583,9 @@ public final class Engine {
      */
     private static final float INOUT_DROP_DP = 7f;
 
+    /** 箭头的横向偏移（dp，负值 = 左移）。和制式标一起走，两者左缘才始终对齐。 */
+    private static final float INOUT_SHIFT_DP = 2f;
+
     /** 双卡布局下 mobile_signal 的高度基准（560dpi 实测 56px） */
     private static final int DUAL_COLUMN_H = 56;
 
@@ -1518,6 +1611,9 @@ public final class Engine {
             int px = Math.round(INOUT_DROP_DP * v.getResources().getDisplayMetrics().density
                     * columnRatio());
             v.setTranslationY(px);
+            // 横向一起左移，保证箭头左缘和上方制式标始终对齐
+            v.setTranslationX(Math.round(-INOUT_SHIFT_DP
+                    * v.getResources().getDisplayMetrics().density));
         } catch (Throwable ignore) {}
     }
 
@@ -2038,8 +2134,6 @@ public final class Engine {
                                 // 首帧失败后就再没人调用了，这里兜住）
                                 if (main instanceof ImageView) stack((ImageView) main);
                                 lockSpeedWidth(main);
-                                // 布局完成后补钉一次：系统可能在布局里把 data_inout 改回 GONE/0 宽
-                                pinInoutWidth(main);
                             } catch (Throwable ignore) {}
                         }
                     });
@@ -2550,6 +2644,10 @@ public final class Engine {
         // 每次都立刻重算就等于把「事件风暴」搬进 UI 线程。
         WIFI_CACHED_MS = -100000L;
         LABEL_DIRTY = true;
+        // Wi-Fi 刚断的瞬间 ConnectivityManager 往往还报「连着」，那次 pin 会被放开；
+        // 400ms 后判据稳定了再补一次（去抖）。
+        UI.removeCallbacks(REPIN_LATER);
+        UI.postDelayed(REPIN_LATER, 400);
         // 只重绘，不重建：WiFi 上下线时系统马上会重draw 自己的图标，
         // 我们在这里再 refreshAll() 等于和系统抢同一帧，WiFi 图标会被压到后面才出现。
         try {

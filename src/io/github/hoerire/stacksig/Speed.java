@@ -125,6 +125,9 @@ final class Speed {
 
     static int cellWidth() { return SPEED_CELL_W; }
 
+    /** 当前算出来的速率（B/s）。Engine 用它判断「有没有数据活动」，决定箭头显示与否 */
+    static long currentBps() { return OUR_SPEED_BPS; }
+
     /** 已捕获的网速 View（主状态栏 / 下拉栏各一份） */
     private static final java.util.WeakHashMap<Object, Boolean> SPEED_VIEWS =
             new java.util.WeakHashMap<>();

@@ -14,8 +14,13 @@ import io.github.libxposed.api.XposedModule;
  * 数组顺序就是显示顺序 —— 改数组是纯数据操作，不碰视图树，零崩溃风险。
  *
  * 目标顺序：
- *   网速 → NFC → 闹钟 → 免打扰 → 月亮 → 信号 → WiFi → 电池
+ *   网速 → 蓝牙 → 闹钟 → 免打扰 → 月亮 → 信号 → WiFi → 电池
  * 网速顶在最左，数字变宽只会往左长，右侧图标永远不会被推动。
+ *
+ * 蓝牙排在网速后面（2026-11-02 用户要求）：蓝牙图标有三种宽度
+ * （未连接 13dp / 已连接 17dp / 已连接并显示设备电量 18dp），排在最右边会紧贴
+ * 信号格左上角的制式标；放到闹钟之前以后，它长宽变化只会推动闹钟/音量，
+ * 与制式标再无关系，三种状态都不用单独处理。
  */
 final class Order {
 
@@ -52,19 +57,24 @@ final class Order {
     }
 
     /**
-     * 重排 icon 数组。
+     * 重排 icon 数组（数组顺序 = 显示顺序，从左到右）。
      *
      * 1. mobile 挪到 wifi 前（对齐 C17 的「信号 → WiFi」）；
-     * 2. zen（月亮）挪到 network_speed 前；
-     * 3. network_speed 提到 zen 之前——让网速成为这一簇最左的一格。
+     * 2. zen（月亮）挪到 wifi 前（和 mobile 一起，月亮在信号左侧）；
+     * 3. network_speed 提到 logging 前——让网速成为这一簇最左的一格，
      *    数字宽度（115 / 1.20M / 12.3）一直变，它站在最左边就只会往左长，
-     *    右边的闹钟/铃铛/月亮永远不会被挤动，也就不需要额外预留缓冲。
+     *    右边的图标永远不会被挤动；
+     * 4. bluetooth 挪到 alarm_clock 前（紧跟网速之后，见类头注释）。
      */
     private static void reorder(String[] slots) {
         moveBefore(slots, "mobile", "wifi");
         moveBefore(slots, "zen", "wifi");
         moveBefore(slots, "network_speed", "logging");
         // 网速提到最左：越过 mute / ethernet / alarm_clock，成为整簇第一格
+
+        // 蓝牙紧跟网速之后（锚点用 alarm_clock，不管中间那些偶尔出现的
+        // nfc / hotspot / cast 开没开，蓝牙都稳定落在闹钟左边）
+        moveBefore(slots, "bluetooth", "alarm_clock");
     }
 
     /** 把 slot 名为 what 的元素挪到 slot 名为 before 的元素之前；任一个找不到就原样不动 */

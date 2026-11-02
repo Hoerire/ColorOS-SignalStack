@@ -9,54 +9,35 @@ import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * 状态栏图标间距。
+ * 状态栏那一排在布局时的挂点。
  *
- * 只调 padding，不动 View 的宽高，也不碰容器里的子 View 顺序。
+ * **这里不改任何间距。** padding / margin / 宽度 / translationX 一律不碰，位置完全交给
+ * 系统的 StatusIconContainer.updateStates()。2026-11-02 起用户明确要求间距走原厂，
+ * 历史上那套「按 slot 配 padding」「给蓝牙单独留 1px」的代码已全部删除，不要再加回来。
  *
- * 历史教训（都踩过）：
- *   - 按「可见序号」绑定 padding：蓝牙排到第 3 位时被当成月亮，套错值后贴死 5G 徽标；
- *   - 给每个图标配独立的 padding：左右增减一个图标，所有缝就重排；
- *   - 实测墨迹宽度做自适应、固定 View 宽度：视觉上割裂。
- * 现在只按 slot 名给极少数特例（蓝牙右邻是制式标），其余一律同一个基准值。
+ * 现在只做两件事，都挂在 updateStates() 这次布局上：
+ *   1. 登记窗口里的网速格，第一次见到时启动网速 ticker；
+ *   2. DBG 打开时打一行 `bar:` 快照（各格宽度 / padding / x / 可见性 / 箭头位移）。
+ *
+ * 之所以挂 updateStates 而不是一次性的 setPadding：它每次布局都会跑，
+ * 是「这一排刚排完」的最可靠时机，网速 ticker 也能跟着第一批图标一起起来。
  */
 final class Spacing {
 
-    // ==================== 图标间距 ====================
+    private Spacing() {}
 
-    /**
-     * 所有普通格的左右 padding 基准。
-     *
-     * 整簇偏宽就往小调、偏窄就往大调 —— 只改这一个数。
-     * 不要按图标身份分别配值：图标显隐一变，缝就重排（蓝牙曾被当成月亮套错值）。
-     */
-    private static final int GAP_INSET_PX = 0;
-
-    /**
-     * 只压缩「信号 → WiFi」之间的缝，电池位置不动。
-     *
-     * StatusIconContainer.updateStates() 从右往左累加
-     *   child.getWidth() + paddingStart + paddingEnd
-     * 得出每格的 translationX。给 mobile_combo 加负的 paddingEnd，它和它左边的东西
-     * 都会整体右移，右侧的 WiFi / 电池纹丝不动 —— 这正是"只缩间距不挪电池"。
-     *
-     * updateStates 每次布局都会跑，所以挂在这里而不是一次性的 setPadding。
-     */
-    static int hookIconGap(XposedModule m, ClassLoader cl) {
+    static int hookBarLayout(XposedModule m, ClassLoader cl) {
         try {
-            Class<?> c = Class.forName(
-                    "com.android.systemui.statusbar.phone.StatusIconContainer", false, cl);
-            int n = 0;
             Class<?> sic = Class.forName(
                     "com.android.systemui.statusbar.phone.StatusIconContainer", false, cl);
             Method st = sic.getDeclaredMethod("updateStates");
             m.hook(st).intercept(new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
-                    try { tightenGap((ViewGroup) ch.getThisObject()); } catch (Throwable ignore) {}
+                    try { onLayout((ViewGroup) ch.getThisObject()); } catch (Throwable ignore) {}
                     return ch.proceed();
                 }
             });
-            n++;
-            return n;
+            return 1;
         } catch (Throwable t) {
             try { Engine.MODULE.log(android.util.Log.WARN, "StackSig", "iconGap hook failed: " + t); }
             catch (Throwable ignore) {}
@@ -82,107 +63,98 @@ final class Spacing {
     }
 
     private static long lastDumpMs = 0;
+    private static long lastBadMs = 0;
 
-    /** 诊断：把 StatusIconContainer 的每个子 view 名字/可见性/宽度打出来 */
-    private static void dumpBar(ViewGroup g) {
-        if (!Engine.DBG) return;
-        long now = android.os.SystemClock.uptimeMillis();
-        if (now - lastDumpMs < 2000) return;
-        lastDumpMs = now;
-        try {
-            StringBuilder sb = new StringBuilder("bar:");
-            for (int i = 0; i < g.getChildCount(); i++) {
-                View c = g.getChildAt(i);
-                String n = Engine.entryName(c);
-                int w = c.getWidth();
-                int v = c.getVisibility();
-                if (w <= 0 && v != View.VISIBLE) continue;      // 只打有意义的
-                sb.append(' ').append(n).append('=').append(w).append('/').append(v);
-                // 移动数据那一格内部：把 data_inout（上下行箭头）的可见性/宽度/位移一起打出来，
-                // 「切几轮后箭头不恢复」只有这一层能看出来。
-                if (c instanceof android.view.ViewGroup && "mobile_combo".equals(n)) {
-                    View di = Engine.findDataInout((android.view.ViewGroup) c, 0);
-                    if (di != null) {
-                        sb.append("[inout=").append(di.getWidth())
-                                .append('/').append(di.getVisibility())
-                                .append(",ty=").append(di.getTranslationY()).append(']');
-                    } else {
-                        sb.append("[inout=null]");
-                    }
-                }
-            }
-            Engine.dbg(sb.toString());
-        } catch (Throwable ignore) {}
-    }
-
-    private static void tightenGap(ViewGroup g) {
+    private static void onLayout(ViewGroup g) {
         dumpBar(g);
         for (int i = 0; i < g.getChildCount(); i++) {
             View v = g.getChildAt(i);
             if (v.getVisibility() != View.VISIBLE) continue;
             if (!isStatusIcon(v)) continue;
             Speed.rememberSpeedView(v);
-            // 网速 ticker 在这里启动：tightenGap 每次布局都会跑，
+            // 网速 ticker 在这里启动：这一排每次布局都会经过，
             // 比挂在 stack() 里可靠（stack 只在有信号图标时才执行）。
             Speed.ensureTicker(v.getContext());
-            int[] pe = gapFor(v);
-            if (v.getPaddingLeft() != pe[0] || v.getPaddingRight() != pe[1]) {
-                v.setPadding(pe[0], v.getPaddingTop(), pe[1], v.getPaddingBottom());
-            }
-
-            // 早先的 equalize() 实验给网速留下过 translationX，会让它画到别处甚至看不见。
-            // 这里统一清掉，位置完全交给系统的 updateStates。
-            if (v.getTranslationX() != 0f) {
-                v.setTranslationX(0f);
-                v.invalidate();
-            }
         }
     }
 
     /**
-     * 每格的左右 padding。除蓝牙外全部相同。
+     * 诊断：把 StatusIconContainer 每个子 view 的宽度 / 可见性 / padding / x 打出来。
      *
-     * 这里刻意**不做按图标身份的区分**：曾经给 nfc / alarm / zen / bluetooth 各配一组值，
-     * 结果左右增减一个图标（开蓝牙、开免打扰）缝就重排 —— 因为「某格到右邻的缝」
-     * 取决于右邻是谁，而右邻随时会变。统一成一个值后，图标增删只改变总宽。
+     * 查「位置不对」先看这一行：`p=` 是格子自己的 padding，`x=` 是系统算出来的横坐标，
+     * `pad=` 是容器内边距。三者都没被模块改过（模块不碰间距），
+     * 所以任何异常都来自系统自身或 drawable 的内在留白。
      */
-    private static int[] gapFor(View v) {
-        // 蓝牙右边紧挨信号格左上角的制式标，需要比其他格多留 1px
-        if (v.getId() == View.NO_ID) {
-            String slot = Spacing.slotOf(v);
-            if (slot != null && slot.contains("bluetooth")) {
-                return new int[]{GAP_INSET_PX, GAP_INSET_PX + 1};
-            }
-        }
-        return new int[]{GAP_INSET_PX, GAP_INSET_PX};
-    }
-
-    /** 反射调 StatusIconDisplayable.getSlot()，拿不到返回 null */
-    static String slotOf(View v) {
+    private static void dumpBar(ViewGroup g) {
+        if (!Engine.DBG) return;
+        // 只打「真的显示在屏幕上」的那一个容器：下拉栏 / 锁屏里还有几份同结构的
+        // StatusIconContainer，打错了会得出「inout 和网速都正常」的结论，
+        // 而屏幕上那份其实是另一套状态。isShown() 把祖先可见性和窗口挂载都算进来。
+        boolean shown;
+        try { shown = g.isShown() && g.getWidth() > 0; } catch (Throwable t) { shown = false; }
+        if (!shown) return;
+        // 再按「屏幕绝对位置」筛一遍：状态栏那一排贴着屏幕顶部（y≈0）、靠右。
+        // 下拉控制中心里还有一份同结构容器（w≈370~480、x 在屏幕中部），
+        // 它也有 mobile_combo，光看 isShown + combo 会把它当成状态栏那排。
+        int[] loc = new int[2];
+        try { g.getLocationOnScreen(loc); } catch (Throwable t) { loc[0] = loc[1] = -1; }
+        if (loc[1] < 0 || loc[1] > 150) return;
+        long now = android.os.SystemClock.uptimeMillis();
         try {
-            Method md = null;
-            for (Class<?> c = v.getClass(); c != null && md == null; c = c.getSuperclass()) {
-                try { md = c.getDeclaredMethod("getSlot"); } catch (Throwable ignore) {}
+            StringBuilder sb = new StringBuilder("bar: pad=")
+                    .append(g.getPaddingLeft()).append('/').append(g.getPaddingRight())
+                    .append(" w=").append(g.getWidth()).append(" x=").append(Math.round(g.getX()));
+            // 「看起来缺了一块」的判据：网速格没了/塌了，或者箭头不可见/塌了。
+            // 一旦命中就不受 2 秒节流，按 200ms 打一行 —— 要抓的是"坏掉的那几秒"。
+            // 只对「含 mobile_combo 的容器」做判定：窗口里还有别的 StatusIconContainer
+            // （锁屏 / 控制中心 / 转场动画里那份），它们本来就没有移动数据那一格。
+            boolean hasCombo = false;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                String cn = Engine.entryName(g.getChildAt(i));
+                if (cn != null && cn.contains("mobile_combo")) { hasCombo = true; break; }
             }
-            // 多数实现把 getSlot() 声明在接口 StatusIconDisplayable 上，类里继承而来
-            if (md == null) {
-                for (Class<?> c = v.getClass(); c != null && md == null; c = c.getSuperclass()) {
-                    for (Class<?> itf : c.getInterfaces()) {
-                        try { md = itf.getMethod("getSlot"); break; } catch (Throwable ignore) {}
+            if (!hasCombo) {
+                if (now - lastDumpMs >= 2000) { lastDumpMs = now; Engine.dbg("bar(旁支): " + g.getWidth() + "x" + g.getHeight()); }
+                return;
+            }
+            // Wi-Fi 下 data_inout 被系统设 GONE 是**正常**的（我们不钉占位），
+            // 只有「没连 Wi-Fi 时箭头 / 网速不见」才是要抓的问题。
+            final boolean wifi = Engine.wifiNow();
+            boolean bad = false;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View c = g.getChildAt(i);
+                String n = Engine.entryName(c);
+                int w = c.getWidth();
+                int v = c.getVisibility();
+                if (w <= 0 && v != View.VISIBLE) continue;      // 只打有意义的
+                if (n == null) n = c.getClass().getSimpleName();
+                if (n.contains("network_speed") && (w < 10 || v != View.VISIBLE)) bad = true;
+                sb.append(' ').append(n).append('=').append(w).append('/').append(v)
+                        .append(",p=").append(c.getPaddingLeft()).append(',').append(c.getPaddingRight())
+                        .append(",x=").append(Math.round(c.getX()));
+                // 移动数据那一格内部：data_inout（上下行箭头）的可见性 / 宽度 / 位移。
+                if (c instanceof ViewGroup && "mobile_combo".equals(n)) {
+                    View di = Engine.findDataInout((ViewGroup) c, 0);
+                    if (di != null) {
+                        sb.append("[inout=").append(di.getWidth())
+                                .append('/').append(di.getVisibility())
+                                .append(",ty=").append(di.getTranslationY()).append(']');
+                        if (!wifi && (di.getWidth() == 0 || di.getVisibility() != View.VISIBLE)) bad = true;
+                    } else {
+                        sb.append("[inout=null]");
+                        if (!wifi) bad = true;
                     }
                 }
             }
-            if (md == null) return null;
-            md.setAccessible(true);
-            Object r = md.invoke(v);
-            return r instanceof String ? (String) r : null;
-        } catch (Throwable ignore) {
-            return null;
-        }
+            if (bad) {
+                if (now - lastBadMs >= 200) {
+                    lastBadMs = now;
+                    Engine.dbg("BAR!! " + sb + " || " + Engine.diagSummary());
+                }
+            } else if (now - lastDumpMs >= 2000) {
+                lastDumpMs = now;
+                Engine.dbg(sb.toString());
+            }
+        } catch (Throwable ignore) {}
     }
-
-    /**
-     * 系统真正给状态栏图标上色走的是 StatusBarIconView.onDarkChanged(area, darkIntensity, ...)。
-     * 在这之后立刻把我们的 drawable 重建，颜色就跟系统完全同步了。
-     */
 }

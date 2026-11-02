@@ -3,5 +3,5 @@ targetApiVersion=102
 staticScope=true
 exceptionMode=protective
 name=状态栏美化
-version=v1.1.2
-versionCode=50
+version=v1.1.3
+versionCode=51

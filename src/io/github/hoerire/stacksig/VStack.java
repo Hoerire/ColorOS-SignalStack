@@ -9,36 +9,31 @@ import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 
 /**
- * C17 双排信号 + 制式标。
+ * C17 双排信号（主卡 + 副卡）。
  *
  * 颜色：完全交给系统。状态栏图标是 ImageView，系统换色时调用
  * setImageTintList / setColorFilter，这两个调用会经由下面三个转发方法
- * 落到 primary / secondary / badge 三张图上。本类不自行决定颜色。
+ * 落到 primary / secondary 两张图上。本类不自行决定颜色。
  *
  * 唯一例外：如果宿主 ImageView 身上始终没有 tint（极少数启动器/旧版本），
  * 才用系统 onDarkChanged 给的 darkIntensity 按原厂公式算一个兜底色。
+ *
+ * 制式标（5G / 4G）自 v1.10 起是 mobile_combo 上的独立 TextView，
+ * 不再由本类绘制 —— 这里原来那套 badge 字段/绘制路径已经删干净。
  */
 public final class VStack extends Drawable {
 
-    // 制式标：高度统一，宽度按素材自身宽高比（5GA 三个字符自然更宽，但不许压扁）
-    private static final float BADGE_H = 0.30f;
-    private static final float BADGE_RATIO = 1.38f; // 素材拿不到 intrinsic 时的兜底比例
-    private static final float BADGE_Y = 0.08f;
-    private static final float BADGE_X = 0.02f;   // 信号左上角（与早期一致）
-
     private final Drawable primary;
     private final Drawable secondary;
-    private Drawable badge;
     private int alpha = 255;
 
     private boolean hasSystemTint = false;
     private float fallbackDark = -1f;
     private int appliedFallback = 0;
 
-    public VStack(Drawable primary, Drawable secondary, ColorStateList tint, Drawable badge) {
+    public VStack(Drawable primary, Drawable secondary, ColorStateList tint) {
         this.primary = primary;
         this.secondary = secondary;
-        this.badge = badge;
         if (tint != null) setTintList(tint);   // 初始色 = 系统此刻给这一格的 tint
     }
 
@@ -66,7 +61,6 @@ public final class VStack extends Drawable {
     private void pushTint(ColorStateList tint) {
         try { primary.setTintList(tint); } catch (Throwable ignore) {}
         if (secondary != null) { try { secondary.setTintList(tint); } catch (Throwable ignore) {} }
-        if (badge != null) { try { badge.setTintList(tint); } catch (Throwable ignore) {} }
         invalidateSelf();
     }
 
@@ -74,14 +68,12 @@ public final class VStack extends Drawable {
     public void setTintMode(PorterDuff.Mode mode) {
         try { primary.setTintMode(mode); } catch (Throwable ignore) {}
         if (secondary != null) { try { secondary.setTintMode(mode); } catch (Throwable ignore) {} }
-        if (badge != null) { try { badge.setTintMode(mode); } catch (Throwable ignore) {} }
     }
 
     @Override
     public void setColorFilter(ColorFilter cf) {
         try { primary.setColorFilter(cf); } catch (Throwable ignore) {}
         if (secondary != null) { try { secondary.setColorFilter(cf); } catch (Throwable ignore) {} }
-        if (badge != null) { try { badge.setColorFilter(cf); } catch (Throwable ignore) {} }
         invalidateSelf();
     }
 
@@ -107,24 +99,6 @@ public final class VStack extends Drawable {
                 secondary.setAlpha(alpha);
                 secondary.draw(c);
             }
-
-            if (badge != null) {
-                int bh = Math.round(b.height() * BADGE_H);
-                int iw = badge.getIntrinsicWidth();
-                int ih = badge.getIntrinsicHeight();
-                int bw = (iw > 0 && ih > 0) ? Math.round(bh * (float) iw / ih)
-                                            : Math.round(bh * BADGE_RATIO);
-                if (bw > b.width()) bw = b.width();      // 绝不超过 View 宽度，否则会被裁
-                // 左对齐在 BADGE_X 处；若右侧会越界，就往左收，保证整枚制式标可见。
-                // 5GA 比 4G 宽，靠这条规则自动往左让，不会被切掉「5」。
-                int bl = b.left + Math.round(b.width() * BADGE_X);
-                if (bl + bw > b.right) bl = b.right - bw;
-                if (bl < b.left) bl = b.left;
-                int bt = b.top + Math.round(b.height() * BADGE_Y);
-                badge.setBounds(bl, bt, bl + bw, bt + bh);
-                badge.setAlpha(alpha);
-                badge.draw(c);
-            }
         } catch (Throwable ignore) {}
     }
 
@@ -138,13 +112,12 @@ public final class VStack extends Drawable {
     }
 
     /**
-     * 固有高度取「两张素材里更高的那张」。
+     * 固有高度取 primary 的。
      *
-     * 原来直接用 primary.getIntrinsicHeight()。切数据卡后主副卡角色互换，
-     * primary 换成另一张卡的素材，两张素材高度不同（满高柱 vs 半高柱），
-     * ImageView 的测量高度跟着变，整条信号在状态栏里上下移动 ——
-     * 实测切卡后下沿从 102 收到 95，肉眼就是「信号整体往上跑」。
-     * 取两者的最大值，高度就与「谁当主卡」无关，切卡只换内容不换尺寸。
+     * 注：这里曾经想改成「两张素材取最大值」来避免切卡后高度跳动，
+     * 但实测 draw() 里的 aspectFit 是按 primary 自己的宽高比铺满 bounds 的，
+     * 高度一旦改成 max，铺出来的柱高反而与传入的 bounds 对不上（柱子被压矮一截），
+     * 所以保持 primary —— 高度跳动的真正解法在 build() 里固定素材族（family 恒为 lte）。
      */
     @Override public int getIntrinsicHeight() { return primary.getIntrinsicHeight(); }
 

@@ -19,10 +19,12 @@ import io.github.libxposed.api.XposedModule;
  *
  * 原则：
  *  1. 不往系统容器里塞任何 view（StatusIconContainer 会把每个子 view 强转成
- *     StatusIconDisplayable，塞进去必崩）；
- *  2. 只替换 mobile_signal 这个 ImageView 的 drawable，画面全在自己的 drawable 里画；
- *  3. 制式标（2G/3G/4G/5G）、主卡大信号、副卡小信号都在同一张 drawable 里，
- *     所以永远同高、永远可见；WiFi 连上时制式标不画（宽度自动回收）。
+ *     StatusIconDisplayable，塞进去必崩）—— 唯一的例外是制式标，它是挂在
+ *     mobile_combo（普通 ViewGroup）上的独立 TextView；
+ *  2. 只替换 mobile_signal 这个 ImageView 的 drawable，主卡/副卡信号都画在自己的
+ *     drawable 里；
+ *  3. 制式标（2G/3G/4G/5G/5GA）是独立 TextView，由 badge 通道单独刷新，不随 drawable 重建；
+ *     WiFi 连上时制式标收起（返回空串），断开时再显示。
  */
 public final class Engine {
 
@@ -41,8 +43,9 @@ public final class Engine {
     private static boolean netCallbackInstalled;
 
     // ==================== 调试日志开关 ====================
-    // 定位「制式标消失」这类看不见的竞态时，把它改成 true 重新构建即可：
-    // 每 3 秒往 LSPosed 日志打一行 BADGE（label / wifi / 每个 combo 的 tv 状态）。
+    // 排查「制式标消失」这类看不见的竞态时把它改成 true 重新构建：
+    // 每 3 秒往 LSPosed 日志打一行 BADGE（label / wifi / 每个 combo 的 tv 状态），
+    // 另有 stack / collapse / speed / bar: 等明细。发行版保持 false。
     static final boolean DBG = false;
     private static long lastDbgMs = 0;
 
@@ -117,16 +120,24 @@ public final class Engine {
         ok += hookClockColor(m);
         ok += hookDarkChanged(m, cl);
         ok += hookVisibility(m);
-        ok += hookAddView(m);
-        ok += hookSetFlags(m);
-        // 颜色交给系统（见 VStack 注释），这里不再干预
+        // 信号图标本身的颜色走系统 tint（VStack 只转发 setTintList / setColorFilter）；
+        // 制式标（TextView）的颜色由 hookClockColor 跟随时钟换色，见 syncBadgeColor。
         ok += Speed.hookSpeedValue(m, cl);
         ok += hookSpeedAlign(m, cl);
         ok += Order.hookIconOrder(m, cl);
-        ok += Spacing.hookIconGap(m, cl);
+        ok += Spacing.hookBarLayout(m, cl);
         return ok;
     }
 
+    /**
+     * 原厂换色链路（反射出来的真实签名）：
+     *   StatusBarIconView.setIconColor(int, boolean)
+     *   StatusBarIconView.setColorInternal(int)
+     *   StatusBarIconView.setDecorColor(int)
+     *   StatusBarIconView.onDarkChanged(ArrayList, float, int)
+     * 真正把颜色落到图标上的就是 setIconColor / setColorInternal。
+     * 挂在这里 = 和系统同一调用栈里换色，不存在「晚一拍」。
+     */
     private static int hookDarkChanged(XposedModule m, ClassLoader cl) {
         try {
             Class<?> c = null;
@@ -159,7 +170,7 @@ public final class Engine {
                                 Drawable d = iv.getDrawable();
                                 if (d != null) d.invalidateSelf();
                                 iv.post(new Runnable() {
-                                    @Override public void run() { stack((ImageView) iv); }
+                                    @Override public void run() { stack(iv); }
                                 });
                             }
                         }
@@ -291,135 +302,7 @@ public final class Engine {
      * 收起副卡那一份时，系统（尤其在重建状态栏、展开控制中心时）会把它的可见性改回
      * VISIBLE，光靠 setImageDrawable 那条 hook 拦不住 —— 结果就是两个信号图标并排。
      * 这里在每次可见性变化后检查祖先是否被标记隐藏，是就按回去。
-    /**
-     * 系统给状态栏图标重设 tint 时（收起通知面板、回桌面、切深浅色）立刻重绘我们自己的
-     * drawable —— 只借这个时机刷新，不采纳它的颜色值（颜色源仍然是网速文字色）。
-        /**
-     * 原厂换色链路（反射出来的真实签名）：
-     *   StatusBarIconView.setIconColor(int, boolean)
-     *   StatusBarIconView.setColorInternal(int)
-     *   StatusBarIconView.setDecorColor(int)
-     *   StatusBarIconView.onDarkChanged(ArrayList, float, int)
-     * 真正把颜色落到图标上的就是 setIconColor / setColorInternal。
-     * 挂在这里 = 和系统同一调用栈里换色，不存在「晚一拍」。
      */
-
-    /**
-     * 移动数据那一格的上下行箭头（data_inout）在数据断开、切换制式时会被系统设成 GONE。
-     * GONE 不占位，这一格立刻从 91 px 塌到 67 px，右侧整排跟着重排 ——
-     * 这就是「关 5G 时状态栏往右顶一下」的真正原因（实测 data_inout=91/8 时 mobile_combo 91→70）。
-     *
-     * 处理：没连 WiFi 时把它改成 INVISIBLE —— 一样不绘制，但保留占位，宽度恒定，不再横移。
-     * 连着 WiFi 时不动：那时 WiFi 图标进出本身就会重排，让它 GONE 反而不会多出空白。
-     */
-    /** 箭头（data_inout）实测到的自然宽度。新建的 combo 也按这个值占位，避免第一帧偏窄。 */
-    private static volatile int DATA_INOUT_W = 0;
-
-    private static void keepDataInoutWidth(View v) {
-        if (v == null) return;
-        String n = entryName(v);
-        if (!"data_inout".equals(n)) return;
-        try {
-            int vis = v.getVisibility();
-            int w = v.getWidth();
-            // 可见时记录自然宽度（同一台机器固定，91 px @560dpi）
-            if (vis == View.VISIBLE && w > DATA_INOUT_W) DATA_INOUT_W = w;
-
-            ViewGroup.LayoutParams lp = v.getLayoutParams();
-            boolean pinned = lp != null && DATA_INOUT_W > 0 && lp.width == DATA_INOUT_W;
-            boolean wifi = isWifiConnected(v.getContext());
-
-            // 只有「没连 Wi-Fi 且箭头被藏起来」时才需要保留占位。
-            // 其余情况必须把宽度放开：Wi-Fi 下箭头本来不画，钉子留着就变成
-            // 闹钟和信号之间那块空白（实测：连 Wi-Fi 切数据卡后出现，关 Wi-Fi 自己好）。
-            if (wifi || vis == View.VISIBLE) {
-                if (pinned) {
-                    lp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
-                    v.setLayoutParams(lp);
-                    dbg("data_inout 放开占位（wifi=" + wifi + " vis=" + vis + "）");
-                }
-                return;
-            }
-
-            // 隐藏态 + 没连 Wi-Fi：按已知自然宽度钉死。切卡时新 combo 是新建的，
-            // 这一刻箭头还没量出宽度，不钉的话它先按窄的铺一帧、数据恢复后再跳宽 —— 整排 +21px。
-            int want = DATA_INOUT_W;
-            if (want > 0 && lp != null && lp.width != want) {
-                lp.width = want;
-                v.setLayoutParams(lp);
-            }
-            if (vis == View.GONE) {
-                BUSY.set(Boolean.TRUE);
-                v.setVisibility(View.INVISIBLE);
-                dbg("data_inout GONE→INVISIBLE，占位保留 " + want + "px");
-            }
-        } catch (Throwable ignore) {
-        } finally {
-            if (Boolean.TRUE.equals(BUSY.get())) BUSY.set(Boolean.FALSE);
-        }
-    }
-
-    /**
-     * 系统那一格在切制式时可能是**新建**一个 data_inout（带着 GONE 一起 inflate 出来），
-     * 那就不会走 setVisibility，只有 addView 能拦到。这里在挂上去的瞬间就把它改成 INVISIBLE，
-     * 让第一次 layout 就按「保留占位」算，宽度不会先塌再回来。
-     */
-    private static int hookAddView(XposedModule m) {
-        try {
-            Method md = ViewGroup.class.getDeclaredMethod("addView", View.class, int.class);
-            m.hook(md).intercept(new XposedInterface.Hooker() {
-                @Override public Object intercept(XposedInterface.Chain c) throws Throwable {
-                    Object r = c.proceed();
-                    try {
-                        if (Boolean.TRUE.equals(BUSY.get())) return r;
-                        Object child = c.getArg(0);
-                        if (child instanceof View && ((View) child).getVisibility() == View.GONE) {
-                            keepDataInoutWidth((View) child);
-                        }
-                    } catch (Throwable ignore) {}
-                    return r;
-                }
-            });
-            return 1;
-        } catch (Throwable t) {
-            return 0;
-        }
-    }
-
-    /** View.VISIBILITY_MASK 是隐藏常量，写字面量 */
-    private static final int VISIBILITY_MASK = 0x0000000c;
-
-    /**
-     * 实测：切制式时系统把 data_inout 设成 GONE 走的是 View.setFlags(flags, mask)，
-     * 不是 setVisibility —— 挂在 setVisibility 上的 hook 一次都没被调用（诊断日志为空）。
-     * 这里补上 setFlags，同样把 GONE 改成 INVISIBLE，保留占位。
-     */
-    private static int hookSetFlags(XposedModule m) {
-        try {
-            Method md = View.class.getDeclaredMethod("setFlags", int.class, int.class);
-            m.hook(md).intercept(new XposedInterface.Hooker() {
-                @Override public Object intercept(XposedInterface.Chain c) throws Throwable {
-                    Object r = c.proceed();
-                    try {
-                        if (Boolean.TRUE.equals(BUSY.get())) return r;
-                        Object msk = c.getArg(1);
-                        Object flg = c.getArg(0);
-                        if (!(msk instanceof Integer) || !(flg instanceof Integer)) return r;
-                        if ((((Integer) msk) & VISIBILITY_MASK) == 0) return r;
-                        if ((((Integer) flg) & VISIBILITY_MASK) != View.GONE) return r;
-                        if (c.getThisObject() instanceof View) {
-                            keepDataInoutWidth((View) c.getThisObject());
-                        }
-                    } catch (Throwable ignore) {}
-                    return r;
-                }
-            });
-            return 1;
-        } catch (Throwable t) {
-            return 0;
-        }
-    }
-
     private static int hookVisibility(XposedModule m) {
         try {
             Method md = View.class.getDeclaredMethod("setVisibility", int.class);
@@ -428,12 +311,6 @@ public final class Engine {
                     Object r = c.proceed();
                     try {
                         if (Boolean.TRUE.equals(BUSY.get())) return r;
-                        // 只有「刚被设成 GONE」才需要看一眼，其余调用直接放过（这条 hook 每帧都会跑到）
-                        Object arg = c.getArg(0);
-                        if (arg instanceof Integer && (Integer) arg == View.GONE
-                                && c.getThisObject() instanceof View) {
-                            keepDataInoutWidth((View) c.getThisObject());
-                        }
                         Object t = c.getThisObject();
                         if (!(t instanceof View)) return r;
                         if (HIDDEN.isEmpty()) return r;
@@ -716,7 +593,6 @@ public final class Engine {
                         + g.getHeight() + " kids=" + g.getChildCount());
                 BADGE_COMBOS.put(g, Boolean.TRUE);
                 if (fresh) watchComboWidth(g);
-                pinDataInoutIn(g);
                 // 新容器（状态栏重建／下拉栏首次出现）先填一次当前值，
                 // 否则要等到制式下次变化才有文字。已登记过的完全不碰，避免两套写入口。
                 if (fresh) attachBadgeWhenMeasured(g, main.getContext());
@@ -787,14 +663,9 @@ public final class Engine {
             try { applyWifiRule(main); } catch (Throwable ignore) {}
             return;
         }
-        // 重建太快会闪：网络类型在 NR/LTE 之间抖动时，250ms 内只重建一次。
-        // 但主卡变了必须立刻重建（不走节流）—— 否则这一帧画的还是旧角色。
-        boolean roleChanged = !sig.equals(LAST.get(main));
-        long nowMs = android.os.SystemClock.uptimeMillis();
-        // 已经有图了才节流（防抖动）；首次合成必须马上做，否则就是肉眼可见的延迟
-        if (already && !roleChanged && nowMs - lastBuildMs < 250) return;
-        lastBuildMs = nowMs;
-
+        // 走到这里 sig 一定和上次不同（相同的情况在上面那条快路径已经 return），
+        // 所以不需要再做时间节流 —— 原来那行 `already && !roleChanged && ...` 恒为
+        // false，是一段从不执行的死代码，已删。
         LAST.put(main, sig);
 
         Drawable composed = build(a, b, lp, ls, main);
@@ -802,10 +673,6 @@ public final class Engine {
 
         BUSY.set(Boolean.TRUE);
         try {
-            // 左右不留额外留白：状态栏靠容器统一间距，自带 padding 会把这一格撑宽、WiFi 被推歪
-            if (main.getPaddingLeft() != 0 || main.getPaddingRight() != 0) {
-                main.setPadding(0, main.getPaddingTop(), 0, main.getPaddingBottom());
-            }
             attachLayoutWatcher(main);
             // 颜色由系统 tint 驱动，不需要逐帧比对
             startColorTicker(main);
@@ -821,9 +688,6 @@ public final class Engine {
             collapseSiblings(container, primaryRoot, main);
             // 同一个 combo 内部还有第二份 mobile_signal（副卡），外层容器收不掉它
             collapseInnerSignals(primaryRoot, main);
-            // 箭头占位：切卡时新 combo 是新建的，这一帧就把它的宽度按已知自然宽度钉住，
-            // 免得先按窄的那一版铺出来、数据恢复后再跳宽（整排 +21px）
-            pinDataInoutIn(container);
             tighten(main);
             // 状态已确定，再补一次箭头位置：WiFi↔移动数据切换时
             // 前面 applyWifiRule 读到的 wifi 标志可能还是旧值，箭头会漏掉一次下移。
@@ -833,7 +697,7 @@ public final class Engine {
         }
     }
 
-    /** 用 C17 原素材合成：可选制式标 + 主卡 + 副卡 */
+    /** 用 C17 原素材合成：主卡 + 副卡（制式标是独立 TextView，不在 drawable 里） */
     private static Drawable build(Drawable a, Drawable b, int lp, int ls, ImageView main) {
         String family = "lte";
         Drawable pa;
@@ -847,16 +711,8 @@ public final class Engine {
         Drawable pb = ls < 0 ? null : Res17.get(Res17.secondaryName(family, ls));
         if (pa == null || (ls >= 0 && pb == null)) return new StackDraw(a, b);
 
-        // 制式标是独立 TextView（见 attachBadgeText），drawable 里不画
-        Drawable badge = null;
-
-        VStack v = new VStack(pa, pb, main.getImageTintList(), badge);
+        VStack v = new VStack(pa, pb, main.getImageTintList());
         if (FALLBACK_DARK >= 0f) v.setFallbackDark(FALLBACK_DARK);
-        try {
-            // 高度参照网速那一格（两行数字+单位的高度），视觉上跟网速齐平；
-            // 拿不到再退回电池图标
-        } catch (Throwable ignore) {}
-
         return v;
     }
 
@@ -871,6 +727,8 @@ public final class Engine {
      *
      * 只往 mobile_combo（普通 ViewGroup）里加，**不碰 StatusIconContainer** ——
      * 那个容器 onMeasure 会把每个子 View 强转成 StatusIconDisplayable，加进去必崩。
+     */
+
     /**
      * 制式标的左偏移（dp）。
      *
@@ -890,20 +748,7 @@ public final class Engine {
     private static final java.util.WeakHashMap<ViewGroup, Boolean> WIDTH_WATCHED =
             new java.util.WeakHashMap<>();
 
-    /** 在 combo 子树里找 data_inout，按已知自然宽度钉住占位 */
-    private static void pinDataInoutIn(View v) {
-        if (v == null) return;
-        if ("data_inout".equals(entryName(v))) {
-            keepDataInoutWidth(v);
-            return;
-        }
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) pinDataInoutIn(g.getChildAt(i));
-        }
-    }
-
-    /** 递归打子 view 的名字/类名/宽度/可见性，用来定位宽度变化来自哪一层 */
+        /** 递归打子 view 的名字/类名/宽度/可见性，用来定位宽度变化来自哪一层 */
     private static void dumpKids(StringBuilder sb, ViewGroup g, int depth) {
         for (int i = 0; i < g.getChildCount(); i++) {
             View c = g.getChildAt(i);
@@ -925,6 +770,7 @@ public final class Engine {
         combo.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
             @Override public void onLayoutChange(View v, int l, int t, int r, int b,
                                                  int ol, int ot, int or, int ob) {
+                if (!DBG) return;          // 关日志时连字符串都不要拼
                 int w = r - l, ow = or - ol;
                 if (w == ow || (w <= 0 && ow <= 0)) return;
                 try {
@@ -945,6 +791,7 @@ public final class Engine {
      *
      * 顺序要紧：先判 5ga 再判 5g，否则 "ic_s17_5ga" 里也含 "5g"，5GA 会被吞成 5G。
      * WiFi 连接时移动数据不跑流量，制式标直接收掉（返回空串）。
+     */
     // ==================== 制式判定：与系统同源（TelephonyDisplayInfo） ====================
 
     /**
@@ -1069,6 +916,8 @@ public final class Engine {
     private static volatile long WIFI_CACHED_MS = -100000L;
     private static volatile String CACHED_LABEL = "";
     private static volatile boolean LABEL_DIRTY = true;
+    /** 上次真正重算 badgeLabel 的时刻（uptimeMillis），配合 5 秒 TTL 做兜底重算 */
+    private static volatile long LABEL_AT_MS = 0L;
 
     private static volatile android.content.Context APP_CTX;
     private static final android.os.Handler UI = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -1202,9 +1051,13 @@ public final class Engine {
 
     static String badgeLabel(android.content.Context ctx) {
         if (ctx == null) return "";
-        // 没脏就直接用上次的结果：这条路径每 ticker 都会走到，不能有 binder 调用
-        if (!LABEL_DIRTY) return CACHED_LABEL;
+        // 没脏就复用上次结果；但最多复用 5 秒 —— 事件（NetworkCallback / DisplayInfo /
+        // 切卡广播）只要丢一次，脏标记就再也不会被置起来，制式标会永久停在错误值上，
+        // 只能重启 SystemUI。这条 TTL 是最后一道自愈，稳态开销 ≈ 24 次 binder/分钟。
+        long nowMs = android.os.SystemClock.uptimeMillis();
+        if (!LABEL_DIRTY && nowMs - LABEL_AT_MS < 5000L) return CACHED_LABEL;
         LABEL_DIRTY = false;
+        LABEL_AT_MS = nowMs;
         if (wifiCached(ctx)) {
             CACHED_LABEL = "";
             return "";
@@ -1259,7 +1112,11 @@ public final class Engine {
             }
         }
         dbgBadge("push", ctx, label, primaryHost);
-        for (final ViewGroup g : BADGE_COMBOS.keySet()) {
+        // 先快照再遍历：BADGE_COMBOS 是 WeakHashMap，遍历期间只要发生一次 GC 回收，
+        // 或者 attachBadgeText / rebadge 间接触发了 put/remove，就会抛
+        // ConcurrentModificationException —— 外层 catch 吞掉后这一轮刷新直接中断，
+        // 表现就是「某几个 combo 的制式标没跟上」，而且只在特定时序出现。
+        for (final ViewGroup g : new java.util.ArrayList<>(BADGE_COMBOS.keySet())) {
             if (g == null) continue;
             boolean isPrimary = (target == null) || (g == target);
             android.widget.TextView gtv = BADGE_VIEWS.get(g);
@@ -1308,12 +1165,18 @@ public final class Engine {
      */
     private static void rebadge(ViewGroup combo, android.widget.TextView tv) {
         if (combo == null || tv == null) return;
+        // combo 还没量出尺寸时不要重建：attachBadgeWhenMeasured 会挂一个布局监听等尺寸，
+        // 而 2.5 秒一轮的 ticker 会把这些监听器一个个堆起来，等真布局时集中触发一串
+        // attachBadgeText —— 既浪费又会让制式标闪。等系统给尺寸后自然会被重建。
+        if (combo.getWidth() <= 0 || combo.getHeight() <= 0) return;
         try {
             BADGE_VIEWS.remove(combo);
             try { combo.removeView(tv); } catch (Throwable ignore) {}
             attachBadgeWhenMeasured(combo, combo.getContext());
             badgeFixCount++;
-            if (badgeFixCount <= 20) {
+            // 前 20 次逐条打，之后每 50 次补一条 —— 一直重建说明这里在打转，
+            // 不能因为「日志太多」就把现场彻底静音。
+            if (badgeFixCount <= 20 || badgeFixCount % 50 == 0) {
                 try {
                     MODULE.log(android.util.Log.WARN, "StackSig",
                             "制式标丢失，已重建（第 " + badgeFixCount + " 次）");
@@ -1364,7 +1227,8 @@ public final class Engine {
 
     /**
      * 颜色跟随系统。状态栏换色（深/浅色切换、下拉面板遮罩）时系统只回调它自己的图标，
-     * 我们的 TextView 收不到，所以每秒对一次，取到了就停（不重建 drawable，几乎零开销）。
+     * 我们的 TextView 收不到，所以每秒对一次；颜色没变时 setTextColor 不会真正执行
+     * （syncBadgeColor 先比对 getCurrentTextColor），也不重建 drawable，开销极低。
      */
     private static void startBadgeColorTicker() {
         if (badgeColorTickerStarted) return;
@@ -1373,7 +1237,7 @@ public final class Engine {
         h.postDelayed(new Runnable() {
             @Override public void run() {
                 try {
-                    for (ViewGroup g : BADGE_COMBOS.keySet()) {
+                    for (ViewGroup g : new java.util.ArrayList<>(BADGE_COMBOS.keySet())) {
                         if (g == null) continue;
                         android.widget.TextView tv = BADGE_VIEWS.get(g);
                         if (tv != null) syncBadgeColor(tv, g);
@@ -1399,7 +1263,7 @@ public final class Engine {
         try {
             if (clock != null) base = clock.getCurrentTextColor();
         } catch (Throwable ignore) {}
-        for (ViewGroup g : BADGE_COMBOS.keySet()) {
+        for (ViewGroup g : new java.util.ArrayList<>(BADGE_COMBOS.keySet())) {
             if (g == null) continue;
             android.widget.TextView tv = BADGE_VIEWS.get(g);
             if (tv == null) continue;
@@ -1556,8 +1420,28 @@ public final class Engine {
      * 只按名字找会命中错的那一支，把 WiFi 自己的箭头也推下去。
      */
     private static ImageView findByKeyInDataBranch(View v) {
+        // 先精确找 "data_inout"（移动数据那一支的箭头就叫这个名，WiFi 的叫 wifi_inout）。
+        // 精确命中就不用管这一支里有没有 WiFi 节点 —— 下拉栏/某些布局会把两者塞进
+        // 同一个容器，旧的「含 wifi 就整支跳过」会把移动数据的箭头一起跳过，
+        // 结果箭头永远不回位（看起来像消失）。
+        ImageView exact = findImageViewById(v, "data_inout", 0);
+        if (exact != null) return exact;
         if (hasWifiBelow(v)) return null;
         return findByKey(v, "inout", 0);
+    }
+
+    /** 按资源 id 名精确匹配（不是 contains） */
+    private static ImageView findImageViewById(View v, String name, int depth) {
+        if (depth > 14 || v == null) return null;
+        if (v instanceof ImageView && name.equals(entryName(v))) return (ImageView) v;
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                ImageView r = findImageViewById(g.getChildAt(i), name, depth + 1);
+                if (r != null) return r;
+            }
+        }
+        return null;
     }
 
     /**
@@ -1869,7 +1753,35 @@ public final class Engine {
         }
     }
 
-    /** 立刻把所有已知站点重跑一遍判定（清掉 sig 缓存，强制重建） */
+    /** 诊断用：这一刻是不是连着 Wi-Fi（带 5 秒缓存，不会每帧问 binder） */
+    static boolean wifiNow() {
+        try { return wifiCached(APP_CTX); } catch (Throwable t) { return false; }
+    }
+
+    /** 诊断：定位相关的一张速查表（出问题时和 bar: 一起打） */
+    static String diagSummary() {
+        try {
+            int sites = 0, shown = 0;
+            for (ImageView v : SITES.keySet()) {
+                if (v == null) continue;
+                sites++;
+                if (v.isShown()) shown++;
+            }
+            ImageView m = MAIN == null ? null : MAIN.get();
+            String mm = m == null ? "null"
+                    : (m.getWidth() + "x" + m.getHeight() + " vis=" + m.getVisibility()
+                       + " att=" + m.isAttachedToWindow() + " shown=" + m.isShown()
+                       + " last=" + LAST.get(m));
+            return "sites=" + sites + "(shown " + shown + ")"
+                    + " badges=" + BADGE_COMBOS.size()
+                    + " wifi=" + wifiCached(APP_CTX == null ? null : APP_CTX)
+                    + " label='" + CACHED_LABEL + "'"
+                    + " main=" + mm;
+        } catch (Throwable t) {
+            return "diag failed: " + t;
+        }
+    }
+
     static void refreshAllSitesNow() {
         refreshAllSitesNow(true);
     }
@@ -1901,7 +1813,7 @@ public final class Engine {
             }
             // 制式标走独立通道，跟着一起立刻刷，不等 ticker
             if (c0 != null) {
-                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                UI.postDelayed(new Runnable() {
                     @Override public void run() {
                         try { pushBadgeLabel(c0); } catch (Throwable ignore) {}
                     }
@@ -1995,7 +1907,6 @@ public final class Engine {
     /** 副卡那组压成 0，容器才会按内容重算间距 */
     private static final java.util.WeakHashMap<View, Boolean> WATCHED = new java.util.WeakHashMap<>();
     private static long lastLayoutPass = 0;
-    private static long lastBuildMs = 0;
 
     /**
      * WiFi 的槽位复用：
@@ -2067,8 +1978,7 @@ public final class Engine {
      * 从 main 往上找兄弟容器，拿到的必然是同一条状态栏里的那一格。
      */
 
-    /**
-        /** 系统每次重新布局都会把 translation 冲掉，这里挂个监听重压一次 */
+    /** 系统每次重新布局都会把 translation 冲掉，这里挂个监听重压一次 */
     private static void attachLayoutWatcher(final View main) {
         try {
             if (Boolean.TRUE.equals(WATCHED.get(main))) return;
@@ -2085,128 +1995,13 @@ public final class Engine {
                                 // 首帧失败后就再没人调用了，这里兜住）
                                 if (main instanceof ImageView) stack((ImageView) main);
                                 lockSpeedWidth(main);
-                                tightenRightPadding(main);
-                                alignEdges(main);
                             } catch (Throwable ignore) {}
                         }
                     });
         } catch (Throwable ignore) {}
     }
 
-    // ---------- 状态栏两端边距 ----------
-
-    private static final java.util.WeakHashMap<View, Integer> EDGE_BASE = new java.util.WeakHashMap<>();
-
-    /** 按类名在子树里找第一个可见、有尺寸的控件 */
-    private static View findByClass(View root, String key) {
-        if (root == null) return null;
-        if (root.getVisibility() == View.VISIBLE && root.getWidth() > 0
-                && root.getClass().getSimpleName().contains(key)) return root;
-        if (root instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) root;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                View f = findByClass(g.getChildAt(i), key);
-                if (f != null) return f;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 时间与电池到屏幕两边的距离原本不等（左边宽右边窄）。
-     * 这里量出两侧实际差值，把宽的那一侧压回去，让两端边距相等。
-     */
-    private static void alignEdges(View main) {
-        try {
-            int sw = main.getResources().getDisplayMetrics().widthPixels;
-            // 向上找到「整条状态栏」那一层（宽度≈屏宽），别搜到下拉栏/锁屏里的副本
-            View root = main;
-            for (int i = 0; i < 12; i++) {
-                ViewParent p = root.getParent();
-                if (!(p instanceof View)) break;
-                View up = (View) p;
-                root = up;
-                if (up.getWidth() >= sw * 0.9) break;
-            }
-            View clock = findByClass(root, "StatClock");
-            View bat = findByClass(root, "Battery");
-            if (clock == null || bat == null) return;
-            int[] a = new int[2], b = new int[2];
-            clock.getLocationOnScreen(a);
-            bat.getLocationOnScreen(b);
-            int lg = a[0];
-            int rg = sw - (b[0] + bat.getWidth());
-            if (lg <= 0 || rg <= 0 || lg == rg) return;
-            // 只动时间那一侧：电池的位置由 nudgeBattery 负责，这里再碰它会来回打架
-            ViewGroup.LayoutParams lp = clock.getLayoutParams();
-            if (!(lp instanceof ViewGroup.MarginLayoutParams)) return;
-            ViewGroup.MarginLayoutParams m = (ViewGroup.MarginLayoutParams) lp;
-            Integer prev = EDGE_BASE.get(clock);
-            int base = prev == null ? m.getMarginStart() : prev;
-            Integer diff = EDGE_DIFF.get(clock);
-            if (prev == null || diff == null) {
-                // 差值只在首帧量一次。之后每帧重算会跟自己的修正互相追，时钟就会左右跳
-                EDGE_BASE.put(clock, base);
-                diff = lg - rg;
-                EDGE_DIFF.put(clock, diff);
-            }
-            // 只补一半：整排往两侧扩得太多，时钟会被挤掉，这里往回收一档
-            int want = base - Math.round(diff * EDGE_FILL);
-            if (m.getMarginStart() == want) return;
-            m.setMarginStart(want);
-            clock.setLayoutParams(m);
-        } catch (Throwable ignore) {}
-    }
-
-    /** 右侧容器内边距收回量（dp）。原为 8，整排外扩过头，时钟被挤掉，收到 4 */
-    private static final float EXTEND_DP = 4f;
-    /** 两端差值补齐比例。原为 1.0（完全拉平），太靠边，收到 0.5 */
-    private static final float EDGE_FILL = 0.5f;
-
     private static final java.util.WeakHashMap<View, Integer> SPEED_MAX_W = new java.util.WeakHashMap<>();
-    private static final java.util.WeakHashMap<ViewGroup, Integer> PAD_BASE = new java.util.WeakHashMap<>();
-    private static final java.util.WeakHashMap<View, Integer> EDGE_DIFF = new java.util.WeakHashMap<>();
-
-    /**
-     * 右侧那一排在容器里还剩一圈 padding。把它收掉，整排就会往右挪，
-     * 两端边距一起变小；电池不会超出容器，尖头也就不会缺。
-     */
-    private static void tightenRightPadding(View main) {
-        try {
-            int sw = main.getResources().getDisplayMetrics().widthPixels;
-            View root = main;
-            for (int i = 0; i < 12; i++) {
-                ViewParent p = root.getParent();
-                if (!(p instanceof View)) break;
-                View up = (View) p;
-                root = up;
-                if (up.getWidth() >= sw * 0.9) break;
-            }
-            View bat = findByClass(root, "Battery");
-            if (bat == null) return;
-            View cur = bat;
-            int cut = Math.round(EXTEND_DP * main.getResources().getDisplayMetrics().density);
-            for (int i = 0; i < 6; i++) {
-                ViewParent p = cur.getParent();
-                if (!(p instanceof ViewGroup)) return;
-                ViewGroup g = (ViewGroup) p;
-                int pad = g.getPaddingRight();
-                if (pad > 0) {
-                    Integer base = PAD_BASE.get(g);
-                    if (base == null) {
-                        base = pad;
-                        PAD_BASE.put(g, base);
-                    }
-                    int want = Math.max(0, base - cut);
-                    if (pad != want) {
-                        g.setPadding(g.getPaddingLeft(), g.getPaddingTop(), want, g.getPaddingBottom());
-                    }
-                    return;
-                }
-                cur = g;
-            }
-        } catch (Throwable ignore) {}
-    }
 
     /** 状态栏那一格网速里的 TextView（母容器名字里带 network_speed） */
     private static android.widget.TextView findSpeedText(View v, int depth) {
@@ -2438,14 +2233,13 @@ public final class Engine {
     }
 
     /**
-     * 收起副卡那一支。
+     * 收起副卡那一支：INVISIBLE + 宽度压成 0，两条必须同时满足。
      *
-     * **绝不改 LayoutParams**。改动会触发重新 measure，而父容器是 wrap_content 的，
-     * 被压成 0 之后整条链路的高度基准就变了（实测 70 → 56），主卡信号跟着矮 7px ——
-     * 这正是「切数据卡后信号整体上移、只有重启状态栏才恢复」的成因。
-     * ColorOS 17 之所以没这毛病，是因为它只有一个 View，压根没有「收起另一个」这回事。
+     *   - **高度不能动**：父容器是 wrap_content，高度一塌（实测 70 → 56），主卡信号
+     *     跟着矮 7px —— 这就是「切卡后信号整体上移、只有重启状态栏才恢复」的成因；
+     *   - **宽度必须压**：只 INVISIBLE 会仍然占着 74px，闹钟到信号之间空出一大块。
      *
-     * 这里只改可见性：INVISIBLE 保留占位尺寸，不参与绘制，父容器高度不受影响。
+     * ColorOS 17 没这毛病，是因为它只有一个 View，压根没有「收起另一个」这回事。
      */
     static void forceHidden(View v) {
         try {
@@ -2523,8 +2317,10 @@ public final class Engine {
      * 这是 ColorOS 17 判主卡的同一判据：系统侧
      * MobileConnectionsRepositoryImpl.activeMobileDataSubscriptionId 就是由
      * TelephonyCallback.onActiveDataSubscriptionIdChanged 推来的。
-     * 注意 getDefaultDataSubscriptionId() 在切卡瞬间会短暂不同步，
-     * 所以先读 registry 里的 mActiveDataSubId，读不到再退回前者。
+     *
+     * 实现只调 SubscriptionManager.getDefaultDataSubscriptionId()。
+     * 它在切卡瞬间会短暂不同步（返回旧卡/INVALID），调用方（stack）已经用
+     * 「activeSub 取不到就不过滤、以及看门狗兜底」来消化这段窗口。
      */
     private static int activeDataSubId(android.content.Context ctx) {
         try {
@@ -2704,12 +2500,6 @@ public final class Engine {
      * 靠 2.5 秒 ticker 会明显慢一拍，这里直接推一次。
      */
     private static void onNetChanged(android.content.Context ctx) {
-        // Wi-Fi 上下线会改变「箭头该不该占位」：立刻把已知 combo 里的 data_inout 过一遍
-        try {
-            for (ViewGroup g : BADGE_COMBOS.keySet()) {
-                if (g != null) pinDataInoutIn(g);
-            }
-        } catch (Throwable ignore) {}
         // Wi-Fi 上下线：缓存立刻失效，由下一个 ticker 周期（最多 2.5s）刷。
         // 这里**不**直接 push：NetworkCallback 的能力变化可能很频繁（信号强度抖动），
         // 每次都立刻重算就等于把「事件风暴」搬进 UI 线程。

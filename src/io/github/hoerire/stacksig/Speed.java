@@ -174,8 +174,12 @@ final class Speed {
             applied += applyAll();
             visible = countShown();
         }
-        Engine.dbg("speed repaint views=" + SPEED_VIEWS.size() + " shown=" + visible
-                + " applied=" + applied + " bps=" + OUR_SPEED_BPS + " live=" + liveSpeedText());
+        // liveSpeedText() 要遍历表并拼字符串，必须放在 DBG 分支里，
+        // 否则发行版（DBG=false）每秒白算一次。
+        if (Engine.DBG) {
+            Engine.dbg("speed repaint views=" + SPEED_VIEWS.size() + " shown=" + visible
+                    + " applied=" + applied + " bps=" + OUR_SPEED_BPS + " live=" + liveSpeedText());
+        }
     }
 
     /** 对表里所有可见实例 apply 一次当前状态，返回成功次数 */
@@ -223,11 +227,6 @@ final class Speed {
         return applied;
     }
 
-    private static void logRepaint(int total, int visible, int applied) {
-        Engine.dbg("speed repaint views=" + total + " shown=" + visible + " applied=" + applied
-                + " bps=" + OUR_SPEED_BPS + " live=" + liveSpeedText());
-    }
-
     /** 诊断：把「当前挂着的」网速 view 的宽度/文本/是否在我们表里打出来 */
     private static String liveSpeedText() {
         try {
@@ -264,7 +263,9 @@ final class Speed {
                 @Override public Object intercept(XposedInterface.Chain ch) throws Throwable {
                     Object r = ch.proceed();
                     try {
-                        Engine.dbg("speed getSpeedText orig=" + r + (r == null ? "" : " (" + r.getClass().getSimpleName() + ")"));
+                        if (Engine.DBG) {
+                            Engine.dbg("speed getSpeedText orig=" + r + (r == null ? "" : " (" + r.getClass().getSimpleName() + ")"));
+                        }
                         long orig = (r instanceof Long) ? (Long) r : 0L;
                         // 原厂要隐藏时给负值，这种不要覆盖
                         if (orig < 0) return r;

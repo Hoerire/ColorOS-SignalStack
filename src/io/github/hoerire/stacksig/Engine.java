@@ -593,6 +593,8 @@ public final class Engine {
                         + g.getHeight() + " kids=" + g.getChildCount());
                 BADGE_COMBOS.put(g, Boolean.TRUE);
                 if (fresh) watchComboWidth(g);
+                // 钉住 data_inout 的占位宽度：combo 宽度若塌到 70，左上角的制式标会压到柱子上
+                pinInoutWidth(g);
                 // 新容器（状态栏重建／下拉栏首次出现）先填一次当前值，
                 // 否则要等到制式下次变化才有文字。已登记过的完全不碰，避免两套写入口。
                 if (fresh) attachBadgeWhenMeasured(g, main.getContext());
@@ -757,6 +759,47 @@ public final class Engine {
                     .append('@').append(Integer.toHexString(System.identityHashCode(c)));
             if (depth > 0 && c instanceof ViewGroup) dumpKids(sb, (ViewGroup) c, depth - 1);
         }
+    }
+
+    /**
+     * data_inout 那一格的天然宽度（560dpi 实测 91px），只用来**钉住占位**。
+     *
+     * 为什么需要它：mobile_combo 的宽度取子 view 的最大值，而 data_inout（91px）
+     * 比 mobile_signal（67px）宽。系统在数据断开时把 inout 设成 GONE，combo 立刻
+     * 从 91 塌到 70 —— 信号柱左移，左上角的制式标（leftMargin 1.15dp 固定）就压到
+     * 柱子上去了（2026-11-02 用户实测）。
+     *
+     * 注意：**只改 lp.width，不改可见性**。可见性交给系统 —— 早先那版会把 GONE 改成
+     * INVISIBLE，结果箭头被我们卡住、切卡后迟迟不恢复（1.1.3 因此整段删掉，
+     * 却导致了「制式标压柱子」这个新问题）。名字里带 Pin 但只 Pin 宽度。
+     */
+    private static volatile int DATA_INOUT_W = 0;
+
+    /** 递归找到 combo 里的 data_inout，把宽度钉成天然宽度（不动可见性） */
+    private static void pinInoutWidth(View v) {
+        if (v == null) return;
+        try {
+            if ("data_inout".equals(entryName(v))) {
+                int w = v.getWidth();
+                if (v.getVisibility() == View.VISIBLE && w > DATA_INOUT_W) DATA_INOUT_W = w;
+                int want = DATA_INOUT_W;
+                if (want <= 0) {
+                    // 还没见过它可见的样子（例如刚重启就处在无数据活动状态）：
+                    // 26dp 是 560dpi 下实测 91px 的等价 dp，按 density 换算兜底。
+                    want = Math.round(26f * v.getResources().getDisplayMetrics().density);
+                }
+                ViewGroup.LayoutParams lp = v.getLayoutParams();
+                if (lp != null && lp.width != want) {
+                    lp.width = want;
+                    v.setLayoutParams(lp);
+                }
+                return;
+            }
+            if (v instanceof ViewGroup) {
+                ViewGroup g = (ViewGroup) v;
+                for (int i = 0; i < g.getChildCount(); i++) pinInoutWidth(g.getChildAt(i));
+            }
+        } catch (Throwable ignore) {}
     }
 
     /**
@@ -1995,6 +2038,8 @@ public final class Engine {
                                 // 首帧失败后就再没人调用了，这里兜住）
                                 if (main instanceof ImageView) stack((ImageView) main);
                                 lockSpeedWidth(main);
+                                // 布局完成后补钉一次：系统可能在布局里把 data_inout 改回 GONE/0 宽
+                                pinInoutWidth(main);
                             } catch (Throwable ignore) {}
                         }
                     });
